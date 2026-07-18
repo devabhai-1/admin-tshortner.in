@@ -636,7 +636,7 @@ app.get('/api/health', (req, res) => {
     res.json({
         ok: true,
         ga4: !!gaClient,
-        firebase: !!admin.apps.length,
+        firebase: !!db,
         property_id: PROPERTY_ID
     });
 });
