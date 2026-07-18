@@ -365,6 +365,24 @@ app.get('/api/analytics', async (req, res) => {
             return res.status(500).json({ error: "GA4 client not initialized" });
         }
 
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        let isStreamActive = true;
+        req.on('close', () => { isStreamActive = false; });
+        res.on('error', (err) => { console.error("Stream error:", err); isStreamActive = false; });
+
+        function emit(event, data) {
+            if (!isStreamActive) return;
+            try {
+                res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+            } catch(e) {
+                isStreamActive = false;
+            }
+        }
+
         const forceFb = req.query.refresh_map === "1";
         const rawMode = req.query.mode === "raw";
         const today = new Date();
