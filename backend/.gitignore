@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Credentials — copy from your existing data update folder
+service_account.json
+service_account_key.json
