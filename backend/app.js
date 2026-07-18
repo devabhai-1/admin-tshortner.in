@@ -156,9 +156,12 @@ function collectLinkCodesFromUser(user) {
 
 async function firebaseMapping() {
   try {
-    const refUsersSnap = await db.ref("users").once('value');
+    const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Firebase Timeout")), ms));
+    const fetchWithTimeout = (ref) => Promise.race([db.ref(ref).once('value'), timeout(10000)]);
+    
+    const refUsersSnap = await fetchWithTimeout("users");
     const refUsers = refUsersSnap.val() || {};
-    const allLinksSnap = await db.ref("allLinks").once('value');
+    const allLinksSnap = await fetchWithTimeout("allLinks");
     const allLinks = allLinksSnap.val() || {};
     const mapping = {};
 
@@ -183,7 +186,7 @@ async function firebaseMapping() {
     }
     return mapping;
   } catch (e) {
-    console.error(e);
+    console.error("Firebase mapping error/timeout:", e.message);
     return {};
   }
 }
@@ -642,9 +645,9 @@ app.get('/api/health', (req, res) => {
 });
 
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Listening http://localhost:${PORT} (cwd keys: ${__dirname})`);
+const PORT = process.env.PORT || 5005;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Listening http://0.0.0.0:${PORT} (cwd keys: ${__dirname})`);
 });
 
 export default app;
