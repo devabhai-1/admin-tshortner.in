@@ -546,8 +546,8 @@ app.get('/api/analytics/stream', async (req, res) => {
         const fbMap = await firebaseMappingCached(forceFb);
         const lidLookup = linkIdToEmailLookup(fbMap);
 
-        const allGaRows = [];
-        const outputRows = [];
+        let fetchedGaRowsCount = 0;
+        let outputRowsCount = 0;
         let totalExpected = null;
         let pages = 0;
         let lastError = "";
@@ -573,31 +573,31 @@ app.get('/api/analytics/stream', async (req, res) => {
                 const batch = response.rows || [];
                 if (batch.length === 0) break;
 
-                allGaRows.push(...batch);
+                fetchedGaRowsCount += batch.length;
                 offset += batch.length;
 
                 const outBatch = rowsToOutput(batch, lidLookup, rawMode);
                 if (outBatch.length > 0) {
-                    outputRows.push(...outBatch);
+                    outputRowsCount += outBatch.length;
                     emit("rows", {
                         rows: outBatch,
                         meta: {
                             ga4_rows_expected: totalExpected,
-                            ga4_rows_fetched: allGaRows.length,
+                            ga4_rows_fetched: fetchedGaRowsCount,
                             ga4_pages: pages,
-                            output_rows: outputRows.length
+                            output_rows: outputRowsCount
                         }
                     });
                 }
 
                 emit("progress", {
                     ga4_rows_expected: totalExpected,
-                    ga4_rows_fetched: allGaRows.length,
+                    ga4_rows_fetched: fetchedGaRowsCount,
                     ga4_pages: pages,
-                    output_rows: outputRows.length
+                    output_rows: outputRowsCount
                 });
 
-                if (totalExpected && allGaRows.length >= totalExpected) break;
+                if (totalExpected && fetchedGaRowsCount >= totalExpected) break;
                 if (batch.length < pageSize) break;
 
             } catch (e) {
@@ -607,19 +607,19 @@ app.get('/api/analytics/stream', async (req, res) => {
             }
         }
 
-        const gaComplete = (totalExpected === null) || (allGaRows.length >= totalExpected);
+        const gaComplete = (totalExpected === null) || (fetchedGaRowsCount >= totalExpected);
         emit("done", {
-            rows: outputRows,
+            rows: [], // Returning empty rows at the end to prevent memory spikes since they were already streamed
             meta: {
                 start_date: startS,
                 end_date: endS,
                 unlimited_days: unlimitedDays,
-                ga4_rows_expected: totalExpected || allGaRows.length,
-                ga4_rows_fetched: allGaRows.length,
+                ga4_rows_expected: totalExpected || fetchedGaRowsCount,
+                ga4_rows_fetched: fetchedGaRowsCount,
                 ga4_pages: pages,
                 ga4_complete: gaComplete,
                 ga4_error: lastError,
-                output_rows: outputRows.length,
+                output_rows: outputRowsCount,
                 raw_mode: rawMode
             }
         });
