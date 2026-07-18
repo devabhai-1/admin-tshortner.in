@@ -36,19 +36,24 @@ try {
     cred = JSON.parse(fbEnv);
   } else {
     const credPath = path.join(__dirname, 'service_account_key.json');
-    cred = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+    if (fs.existsSync(credPath)) {
+      cred = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+    } else {
+      console.warn("⚠ FIREBASE_SERVICE_ACCOUNT missing and no local file found. Firebase won't initialize.");
+    }
   }
   
-  if (cred.private_key) {
-    cred.private_key = cred.private_key.replace(/\\n/g, '\n');
+  if (cred) {
+    if (cred.private_key) {
+      cred.private_key = cred.private_key.replace(/\\n/g, '\n');
+    }
+    const app_firebase = initializeApp({
+      credential: cert(cred),
+      databaseURL: FIREBASE_DATABASE_URL
+    });
+    db = getDatabase(app_firebase);
+    console.log("✅ Firebase connected");
   }
-
-  const app_firebase = initializeApp({
-    credential: cert(cred),
-    databaseURL: FIREBASE_DATABASE_URL
-  });
-  db = getDatabase(app_firebase);
-  console.log("✅ Firebase connected");
 } catch (e) {
   if (e.code === 'app/duplicate-app') {
     db = getDatabase();
@@ -73,12 +78,16 @@ try {
         private_key: gaCred.private_key
       }
     });
+    console.log("✅ GA4 client initialized");
   } else {
-    gaClient = new BetaAnalyticsDataClient({
-      keyFilename: path.join(__dirname, 'service_account.json')
-    });
+    const gaPath = path.join(__dirname, 'service_account.json');
+    if (fs.existsSync(gaPath)) {
+      gaClient = new BetaAnalyticsDataClient({ keyFilename: gaPath });
+      console.log("✅ GA4 client initialized");
+    } else {
+      console.warn("⚠ GA4_SERVICE_ACCOUNT missing and no local file found. GA4 won't initialize.");
+    }
   }
-  console.log("✅ GA4 client initialized");
 } catch (e) {
   console.error("❌ GA4 client init failed:", e);
 }
