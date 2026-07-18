@@ -94,10 +94,15 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
       }
     })
 
+    let allRows = []
+
     es.addEventListener('rows', (ev) => {
       try {
         const data = JSON.parse(ev.data)
-        if (Array.isArray(data?.rows)) onRows?.(data.rows, data.meta || null)
+        if (Array.isArray(data?.rows)) {
+          allRows = allRows.concat(data.rows)
+          onRows?.(data.rows, data.meta || null)
+        }
       } catch {
         /* ignore */
       }
@@ -108,6 +113,7 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
       close()
       try {
         const data = JSON.parse(ev.data)
+        data.rows = allRows
         resolve(data)
       } catch (e) {
         reject(e)

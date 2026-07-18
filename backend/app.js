@@ -551,9 +551,19 @@ app.get('/api/analytics/stream', async (req, res) => {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        let isStreamActive = true;
+        req.on('close', () => { isStreamActive = false; });
+        res.on('error', (err) => { console.error("Stream error:", err); isStreamActive = false; });
 
         const emit = (event, payload) => {
-            res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+            if (!isStreamActive) return;
+            try {
+                res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+            } catch (e) {
+                isStreamActive = false;
+            }
         };
 
         emit("start", {
@@ -576,6 +586,7 @@ app.get('/api/analytics/stream', async (req, res) => {
         const pageSize = Math.max(1, Math.min(GA4_PAGE_SIZE, 250000));
 
         while (true) {
+            if (!isStreamActive) break;
             try {
                 const [response] = await gaClient.runReport({
                     property: `properties/${PROPERTY_ID}`,
@@ -585,6 +596,8 @@ app.get('/api/analytics/stream', async (req, res) => {
                     limit: pageSize,
                     offset: offset,
                 });
+
+                if (!isStreamActive) break;
 
                 pages++;
                 if (totalExpected === null) {
