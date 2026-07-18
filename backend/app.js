@@ -641,9 +641,6 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-app.get('/', (req, res) => {
-    res.json({ service: "tshortner-admin-backend-node", docs: "/api/health" });
-});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
