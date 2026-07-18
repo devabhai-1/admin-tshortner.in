@@ -640,3 +640,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`Listening http://localhost:${PORT} (cwd keys: ${__dirname})`);
 });
+
+export default app;
