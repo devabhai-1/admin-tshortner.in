@@ -154,17 +154,71 @@ function collectLinkCodesFromUser(user) {
   return codes;
 }
 
-async function firebaseMapping() {
-  try {
-    const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Firebase Timeout")), ms));
-    const fetchWithTimeout = (ref) => Promise.race([db.ref(ref).once('value'), timeout(10000)]);
-    
-    const refUsersSnap = await fetchWithTimeout("users");
-    const refUsers = refUsersSnap.val() || {};
-    const allLinksSnap = await fetchWithTimeout("allLinks");
-    const allLinks = allLinksSnap.val() || {};
-    const mapping = {};
+async function fetchWithRetry(url, retries = 2, delayMs = 1000) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'Connection': 'keep-alive',
+          'Accept': 'application/json'
+        }
+      });
+      if (res.ok) return res;
+      console.warn(`⚠ Fetch attempt ${i + 1} status ${res.status} for ${url}. Retrying...`);
+    } catch (e) {
+      if (i === retries) throw e;
+      console.warn(`⚠ Fetch attempt ${i + 1} failed for ${url}: ${e.message}. Retrying...`);
+    }
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  throw new Error(`Fetch failed after ${retries} retries for ${url}`);
+}
 
+async function firebaseMapping() {
+  let refUsers = {};
+  let allLinks = {};
+  let success = false;
+
+  // Try REST API fetch first (highly reliable in proxy/container environments)
+  try {
+    const usersUrl = `${FIREBASE_DATABASE_URL}/users.json`;
+    const linksUrl = `${FIREBASE_DATABASE_URL}/allLinks.json`;
+    
+    console.log("Fetching Firebase mapping via REST API (with retry)...");
+    const [resUsers, resLinks] = await Promise.all([
+      fetchWithRetry(usersUrl, 2, 1000),
+      fetchWithRetry(linksUrl, 2, 1000)
+    ]);
+    
+    refUsers = await resUsers.json() || {};
+    allLinks = await resLinks.json() || {};
+    success = true;
+    console.log("✅ Firebase mapping fetched via REST API");
+  } catch (e) {
+    console.warn("⚠ REST API fetch error, falling back to Admin SDK:", e.message);
+  }
+
+  // Fallback to Firebase Admin SDK if REST API was not successful
+  if (!success) {
+    try {
+      if (!db) throw new Error("Firebase Admin DB not initialized");
+      const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Firebase Timeout")), ms));
+      const fetchWithTimeout = (ref) => Promise.race([db.ref(ref).once('value'), timeout(10000)]);
+      
+      console.log("Fetching Firebase mapping via Admin SDK...");
+      const refUsersSnap = await fetchWithTimeout("users");
+      refUsers = refUsersSnap.val() || {};
+      const allLinksSnap = await fetchWithTimeout("allLinks");
+      allLinks = allLinksSnap.val() || {};
+      console.log("✅ Firebase mapping fetched via Admin SDK");
+    } catch (e) {
+      console.error("❌ Firebase mapping error/timeout:", e.message);
+      return {};
+    }
+  }
+
+  try {
+    const mapping = {};
     for (const emailKey in refUsers) {
       const user = refUsers[emailKey];
       if (typeof user !== 'object') continue;
@@ -186,23 +240,37 @@ async function firebaseMapping() {
     }
     return mapping;
   } catch (e) {
-    console.error("Firebase mapping error/timeout:", e.message);
+    console.error("Error processing Firebase mapping:", e.message);
     return {};
   }
 }
 
 const FB_MAP_CACHE = { at: 0, data: null };
 const FB_MAP_TTL_SEC = parseFloat(process.env.FIREBASE_MAP_CACHE_SEC || '120');
+let FB_MAP_PROMISE = null;
 
 async function firebaseMappingCached(forceRefresh = false) {
   const now = Date.now() / 1000;
   if (!forceRefresh && FB_MAP_CACHE.data && (now - FB_MAP_CACHE.at) < FB_MAP_TTL_SEC) {
     return FB_MAP_CACHE.data;
   }
-  const data = await firebaseMapping();
-  FB_MAP_CACHE.at = now;
-  FB_MAP_CACHE.data = data;
-  return data;
+
+  if (FB_MAP_PROMISE) {
+    console.log("🔗 Reusing in-progress Firebase mapping fetch...");
+    return FB_MAP_PROMISE;
+  }
+
+  FB_MAP_PROMISE = firebaseMapping().then(data => {
+    FB_MAP_CACHE.at = Date.now() / 1000;
+    FB_MAP_CACHE.data = data;
+    FB_MAP_PROMISE = null;
+    return data;
+  }).catch(err => {
+    FB_MAP_PROMISE = null;
+    throw err;
+  });
+
+  return FB_MAP_PROMISE;
 }
 
 function linkIdToEmailLookup(fbMap) {

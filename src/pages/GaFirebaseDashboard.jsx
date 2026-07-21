@@ -299,6 +299,45 @@ export default function GaFirebaseDashboard() {
     })
   }, [analyticsRows, selectedGaDate, tableSort])
 
+  const gaOnlyMetrics = useMemo(() => {
+    let totalViews = 0
+    const uniqueEmails = new Set()
+    const uniqueLinks = new Set()
+    const groups = {}
+
+    for (const row of gaOnlyDisplayRows) {
+      const email = (row.email || '').trim()
+      const linkId = (row.linkId || '').trim()
+      const views = safeNum(row.views)
+
+      totalViews += views
+      if (email) uniqueEmails.add(email)
+      if (linkId) uniqueLinks.add(linkId)
+
+      const key = `${email || '—'}|${linkId || '—'}`
+      if (!groups[key]) {
+        groups[key] = {
+          email: email || '—',
+          linkId: linkId || '—',
+          views: 0,
+        }
+      }
+      groups[key].views += views
+    }
+
+    const sortedGroups = Object.values(groups).map((g) => ({
+      ...g,
+      share: totalViews > 0 ? (g.views / totalViews) * 100 : 0,
+    })).sort((a, b) => b.views - a.views)
+
+    return {
+      totalViews,
+      activeEmailsCount: uniqueEmails.size,
+      activeLinksCount: uniqueLinks.size,
+      groupedRows: sortedGroups,
+    }
+  }, [gaOnlyDisplayRows])
+
   const toggleTableSort = (key) => {
     setTableSort((prev) =>
       prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'desc' },
@@ -910,90 +949,158 @@ export default function GaFirebaseDashboard() {
         )}
 
         {isGaOnly ? (
-          <div className="card ga-card-full">
-            <h2>
-              GA4 Raw Data <small>Latest {GA_INITIAL_DAYS} days auto · purani date select</small>
-            </h2>
-            <div className="card-sub">
-              <span className="tag-small">GA4 only</span>
-              Loaded: {loadedDates.size} dates · select karo jo abhi load nahi (↓ load likha hoga).
-            </div>
-            <div className="row">
-              <div className="field">
-                <label htmlFor="gaDateSelectOnly">Select date</label>
-                <select
-                  id="gaDateSelectOnly"
-                  value={selectedGaDate}
-                  onChange={(e) => setSelectedGaDate(e.target.value)}
-                  disabled={!!loadingDate}
-                >
-                  {pickerDates.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                      {loadedDates.has(d) ? '' : ' ↓ load'}
-                      {loadingDate === d ? ' …' : ''}
-                    </option>
-                  ))}
-                </select>
+          <div className="ga-only-wrapper">
+            <div className="card ga-card-full" style={{ marginBottom: '16px' }}>
+              <h2>
+                GA4 Analytics Panel <small>Only GA4 Mode</small>
+              </h2>
+              <div className="card-sub">
+                <span className="tag-small">GA4 only</span>
+                Loaded: {loadedDates.size} dates · Select date below to load dynamic details.
               </div>
-              <div className="stat-chip">
-                Showing: <strong>{gaOnlyDisplayRows.length}</strong> rows
-                {loadingDate ? ` · loading ${loadingDate}` : ''}
+              <div className="row">
+                <div className="field">
+                  <label htmlFor="gaDateSelectOnly">Select Date</label>
+                  <select
+                    id="gaDateSelectOnly"
+                    value={selectedGaDate}
+                    onChange={(e) => setSelectedGaDate(e.target.value)}
+                    disabled={!!loadingDate}
+                  >
+                    {pickerDates.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                        {loadedDates.has(d) ? '' : ' ↓ load'}
+                        {loadingDate === d ? ' …' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="stat-chip">
+                  Showing: <strong>{gaOnlyDisplayRows.length}</strong> rows
+                  {loadingDate ? ` · loading ${loadingDate}` : ''}
+                </div>
               </div>
             </div>
-            <table className="ga-sort-table">
-              <thead>
-                <tr>
-                  <th>
-                    <button type="button" className="ga-th" onClick={() => toggleTableSort('date')}>
-                      Date{sortMark('date')}
-                    </button>
-                  </th>
-                  <th style={{ minWidth: 160 }}>
-                    <button type="button" className="ga-th" onClick={() => toggleTableSort('email')}>
-                      Email{sortMark('email')}
-                    </button>
-                  </th>
-                  <th>Link ID</th>
-                  <th style={{ minWidth: 180 }}>
-                    <button type="button" className="ga-th" onClick={() => toggleTableSort('path')}>
-                      Page path{sortMark('path')}
-                    </button>
-                  </th>
-                  <th>
-                    <button type="button" className="ga-th" onClick={() => toggleTableSort('views')}>
-                      Views{sortMark('views')}
-                    </button>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {!gaOnlyDisplayRows.length ? (
-                  <tr className="empty">
-                    <td colSpan={5}>
-                      {!analyticsReady && !analyticsRows.length
-                        ? '⏳ Loading GA4…'
-                        : 'No rows — refresh or check GA4 property.'}
-                    </td>
-                  </tr>
-                ) : (
-                  gaOnlyDisplayRows.map((row, i) => (
-                    <tr key={`${row.date}-${row.linkId}-${row.pagePath}-${i}`}>
-                      <td>{row.date}</td>
-                      <td className="email">{row.email || '—'}</td>
-                      <td>{row.linkId || '—'}</td>
-                      <td className="ga-path-cell" title={row.pagePath}>
-                        {row.pagePath && row.pagePath.length > 48
-                          ? `${row.pagePath.slice(0, 46)}…`
-                          : row.pagePath || '—'}
-                      </td>
-                      <td>{row.views}</td>
+
+            {/* Metrics Grid */}
+            <div className="ga-only-metrics-grid">
+              <div className="ga-metric-card">
+                <span className="metric-label">Total Daily Views</span>
+                <span className="metric-value">{gaOnlyMetrics.totalViews.toLocaleString('en-IN')}</span>
+              </div>
+              <div className="ga-metric-card">
+                <span className="metric-label">Active Emails (Users)</span>
+                <span className="metric-value">{gaOnlyMetrics.activeEmailsCount.toLocaleString('en-IN')}</span>
+              </div>
+              <div className="ga-metric-card">
+                <span className="metric-label">Active Links</span>
+                <span className="metric-value">{gaOnlyMetrics.activeLinksCount.toLocaleString('en-IN')}</span>
+              </div>
+            </div>
+
+            {/* Tables Grid */}
+            <div className="ga-only-tables-grid">
+              {/* Grouped Summary Card */}
+              <div className="card">
+                <h3>
+                  Link Summary <small>Grouped by Email × Link ID</small>
+                </h3>
+                <div className="card-sub">
+                  Shows which email owns which link and how many daily views it received.
+                </div>
+                <table className="ga-sort-table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 160 }}>Email</th>
+                      <th>Link ID</th>
+                      <th>Views</th>
+                      <th>% Share</th>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-            <div className={msgClass(gaMsg.kind)}>{gaMsg.text}</div>
+                  </thead>
+                  <tbody>
+                    {!gaOnlyMetrics.groupedRows.length ? (
+                      <tr className="empty">
+                        <td colSpan={4}>No data for selected date.</td>
+                      </tr>
+                    ) : (
+                      gaOnlyMetrics.groupedRows.map((row, i) => (
+                        <tr key={`grouped-${row.email}-${row.linkId}-${i}`}>
+                          <td className="email">{row.email}</td>
+                          <td>{row.linkId}</td>
+                          <td><strong>{row.views.toLocaleString('en-IN')}</strong></td>
+                          <td>{row.share.toFixed(2)}%</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Raw Details Card */}
+              <div className="card">
+                <h3>
+                  Raw Page Paths <small>GA4 URL Specific Views</small>
+                </h3>
+                <div className="card-sub">
+                  Audit list of exact page paths tracked by Google Analytics.
+                </div>
+                <table className="ga-sort-table">
+                  <thead>
+                    <tr>
+                      <th>
+                        <button type="button" className="ga-th" onClick={() => toggleTableSort('date')}>
+                          Date{sortMark('date')}
+                        </button>
+                      </th>
+                      <th style={{ minWidth: 140 }}>
+                        <button type="button" className="ga-th" onClick={() => toggleTableSort('email')}>
+                          Email{sortMark('email')}
+                        </button>
+                      </th>
+                      <th>Link ID</th>
+                      <th style={{ minWidth: 150 }}>
+                        <button type="button" className="ga-th" onClick={() => toggleTableSort('path')}>
+                          Page path{sortMark('path')}
+                        </button>
+                      </th>
+                      <th>
+                        <button type="button" className="ga-th" onClick={() => toggleTableSort('views')}>
+                          Views{sortMark('views')}
+                        </button>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {!gaOnlyDisplayRows.length ? (
+                      <tr className="empty">
+                        <td colSpan={5}>
+                          {!analyticsReady && !analyticsRows.length
+                            ? '⏳ Loading GA4…'
+                            : 'No rows — refresh or check GA4 property.'}
+                        </td>
+                      </tr>
+                    ) : (
+                      gaOnlyDisplayRows.map((row, i) => (
+                        <tr key={`raw-${row.date}-${row.linkId}-${row.pagePath}-${i}`}>
+                          <td>{row.date}</td>
+                          <td className="email">{row.email || '—'}</td>
+                          <td>{row.linkId || '—'}</td>
+                          <td className="ga-path-cell" title={row.pagePath}>
+                            {row.pagePath && row.pagePath.length > 32
+                              ? `${row.pagePath.slice(0, 30)}…`
+                              : row.pagePath || '—'}
+                          </td>
+                          <td>{row.views}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className={msgClass(gaMsg.kind)} style={{ marginTop: '16px' }}>{gaMsg.text}</div>
           </div>
         ) : (
         <div className="two-col">

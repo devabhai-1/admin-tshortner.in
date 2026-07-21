@@ -904,3 +904,83 @@
   width: 100%;
   box-sizing: border-box;
 }
+
+/* —— Only GA4 Panel Additions —— */
+.ga-only-wrapper {
+  padding: 0 16px;
+  width: 100%;
+}
+
+.ga-only-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin: 16px 0 24px 0;
+  width: 100%;
+}
+
+.ga-metric-card {
+  background: radial-gradient(circle at top left, rgba(148, 163, 184, 0.15), rgba(15, 23, 42, 0.95));
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.ga-metric-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(56, 189, 248, 0.5);
+}
+
+.ga-metric-card .metric-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #94a3b8;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+}
+
+.ga-metric-card .metric-value {
+  font-size: 28px;
+  font-weight: 800;
+  color: #f8fafc;
+  background: linear-gradient(90deg, #38bdf8, #34d399);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.ga-only-tables-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+  width: 100%;
+}
+
+@media (min-width: 1200px) {
+  .ga-only-tables-grid {
+    grid-template-columns: 1.1fr 0.9fr;
+  }
+}
+
+.ga-only-tables-grid .card h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #f1f5f9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ga-only-tables-grid .card h3 small {
+  font-size: 11px;
+  color: #94a3b8;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
