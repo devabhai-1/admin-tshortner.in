@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import { getApps, initializeApp } from 'firebase/app'
 import { getDatabase } from 'firebase/database'
+import { FIREBASE_WEB_CONFIG } from '../lib/firebaseWebConfig.js'
 
 const FirebaseContext = createContext({
   db: null,
@@ -9,7 +10,7 @@ const FirebaseContext = createContext({
 })
 
 async function loadFirebaseConfig() {
-  // 1) Vercel / build-time: single JSON env
+  // 1) Vercel build-time env (optional override)
   const envCfg = import.meta.env.VITE_FIREBASE_CONFIG
   if (envCfg && String(envCfg).trim()) {
     try {
@@ -35,16 +36,20 @@ async function loadFirebaseConfig() {
     }
   }
 
-  // 3) Local / public/key.json (not deployed if gitignored)
-  const res = await fetch('/key.json', { cache: 'default' })
-  const contentType = res.headers.get('content-type') || ''
-  const text = await res.text()
-  if (!res.ok || contentType.includes('text/html') || text.trimStart().startsWith('<!')) {
-    throw new Error(
-      'Firebase config missing. Set VITE_FIREBASE_CONFIG in Vercel env, or put key.json in public/ for local dev.',
-    )
+  // 3) Local public/key.json (dev only — often missing on Vercel)
+  try {
+    const res = await fetch('/key.json', { cache: 'default' })
+    const contentType = res.headers.get('content-type') || ''
+    const text = await res.text()
+    if (res.ok && !contentType.includes('text/html') && !text.trimStart().startsWith('<!')) {
+      return JSON.parse(text)
+    }
+  } catch {
+    /* ignore */
   }
-  return JSON.parse(text)
+
+  // 4) Built-in public web config — works on Vercel without env
+  return FIREBASE_WEB_CONFIG
 }
 
 export function FirebaseProvider({ children }) {

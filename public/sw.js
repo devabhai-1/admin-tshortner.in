@@ -1,5 +1,5 @@
 // Service Worker - TShortner Admin PWA
-const CACHE_NAME = 'tshortner-admin-v3-shell'
+const CACHE_NAME = 'tshortner-admin-v4-shell'
 
 const PRECACHE_URLS = [
   '/',
