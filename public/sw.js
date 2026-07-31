@@ -1,5 +1,5 @@
 // Service Worker - TShortner Admin PWA
-const CACHE_NAME = 'tshortner-admin-v1-shell'
+const CACHE_NAME = 'tshortner-admin-v2-shell'
 
 const PRECACHE_URLS = [
   '/',
@@ -58,6 +58,9 @@ self.addEventListener('fetch', (event) => {
 
   const path = url.pathname
 
+  // Never intercept API / SSE — must stay text/event-stream
+  if (path.startsWith('/api/')) return
+
   if (path.startsWith('/assets/')) {
     event.respondWith(fetch(event.request))
     return
@@ -70,9 +73,9 @@ self.addEventListener('fetch', (event) => {
 
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request).catch(() =>
-        caches.match('/index.html').then((r) => r || caches.match('/')),
-      ),
+      fetch(event.request)
+        .then((response) => response)
+        .catch(() => caches.match('/index.html').then((r) => r || caches.match('/'))),
     )
     return
   }
