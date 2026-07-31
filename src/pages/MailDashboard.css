@@ -113,6 +113,10 @@
   color: #64748b;
 }
 
+.mail-dash__err {
+  color: #f87171;
+}
+
 .mail-dash__empty {
   margin: 40px 16px;
   padding: 28px 22px;

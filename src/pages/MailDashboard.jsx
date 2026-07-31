@@ -114,19 +114,32 @@ export default function MailDashboard() {
   const [search, setSearch] = useState('')
   const [selectedKey, setSelectedKey] = useState('')
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
   const deferredSearch = useDeferredValue(search)
 
   const isStreaming = streamProgress?.streaming === true
 
+  // Cache me full usersVal nahi hota — mail select par Firebase se poora node lao
   useEffect(() => {
-    if (!selectedKey) return undefined
+    if (!selectedKey) {
+      setDetailLoading(false)
+      setDetailError('')
+      return undefined
+    }
     let cancelled = false
     setDetailLoading(true)
-    void refreshUser(selectedKey)
-      .catch(() => {})
-      .finally(() => {
+    setDetailError('')
+    void (async () => {
+      try {
+        await refreshUser(selectedKey)
         if (!cancelled) setDetailLoading(false)
-      })
+      } catch (err) {
+        if (!cancelled) {
+          setDetailLoading(false)
+          setDetailError(err?.message || 'User detail load fail')
+        }
+      }
+    })()
     return () => {
       cancelled = true
     }
@@ -169,13 +182,15 @@ export default function MailDashboard() {
   }, [dashboard])
 
   const withdrawals = useMemo(() => {
-    const fromCache = (withdrawalRequests || []).filter((r) => r.emailKey === selectedKey)
-    if (fromCache.length > 0) {
-      return [...fromCache].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    const fromWallet = parseWithdrawalRequests(wallet.withdrawalRequests)
+    if (fromWallet.length > 0) {
+      return [...fromWallet].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
     }
-    const list = parseWithdrawalRequests(wallet.withdrawalRequests)
-    return [...list].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-  }, [withdrawalRequests, selectedKey, wallet.withdrawalRequests])
+    // Fallback: flat list from cache/session (emailKey filter)
+    return withdrawalRequests
+      .filter((r) => r.emailKey === selectedKey)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+  }, [wallet.withdrawalRequests, withdrawalRequests, selectedKey])
 
   const tgLinks = useMemo(() => linkList(links.telegram), [links.telegram])
   const webLinks = useMemo(() => linkList(links.website), [links.website])
@@ -231,17 +246,21 @@ export default function MailDashboard() {
           <button
             type="button"
             className="mail-dash__reload"
-            onClick={() => refreshUsersData()}
-            disabled={reloadBusy || fbConnecting}
+            onClick={() => {
+              if (selectedKey) void refreshUser(selectedKey)
+              else void refreshUsersData()
+            }}
+            disabled={reloadBusy || fbConnecting || detailLoading}
           >
-            {reloadBusy ? 'Reloading…' : 'Reload'}
+            {detailLoading || reloadBusy ? 'Loading…' : selectedKey ? 'Refresh mail' : 'Reload'}
           </button>
         </div>
         <div className="mail-dash__picker-meta">
           <span>{ready ? `${formatInt(overviewRows.length)} mails` : '…'}</span>
           {lastSync ? <span>Synced {formatSyncTime(lastSync)}</span> : null}
           {allUsersLoaded ? <span>All loaded</span> : null}
-          {selectedKey && detailLoading ? <span>Loading full profile…</span> : null}
+          {detailLoading ? <span>Fetching full user…</span> : null}
+          {detailError ? <span className="mail-dash__err">{detailError}</span> : null}
         </div>
       </div>
 
@@ -250,13 +269,20 @@ export default function MailDashboard() {
           <strong>Koi mail select nahi hua</strong>
           <p>Upar se email choose karo — uska poora profile, dashboard aur withdrawals yahan dikhenge.</p>
         </div>
-      ) : !selectedRow && !rawUser ? (
+      ) : !rawUser && !selectedRow && !detailLoading ? (
         <div className="mail-dash__empty">
           <strong>User data nahi mila</strong>
           <p>Is mail ke liye Firebase me node nahi hai ya abhi load nahi hua.</p>
         </div>
       ) : (
         <>
+          {detailLoading && !rawUser ? (
+            <div className="mail-dash__empty">
+              <strong>User detail load ho raha hai…</strong>
+              <p>Firebase se withdrawals, daily earnings aur links fetch kiye ja rahe hain.</p>
+            </div>
+          ) : null}
+
           <section className="mail-dash__profile">
             <div className="mail-dash__profile-main">
               <h2>{profile.name || selectedRow?.name || '—'}</h2>
@@ -305,26 +331,32 @@ export default function MailDashboard() {
           <div className="mail-dash__kpi">
             <div className="mail-dash__kpi-card highlight">
               <span>Total earnings</span>
-              <strong>{formatUsd(selectedRow?.totalEarnings ?? dashboard.totalEarning)}</strong>
+              <strong>
+                {formatUsd(
+                  selectedRow?.totalEarnings ?? dashboard.totalEarning ?? dashboard.totalEarnings,
+                )}
+              </strong>
               <small>dashboard total</small>
             </div>
             <div className="mail-dash__kpi-card">
               <span>Impressions</span>
-              <strong>{formatInt(selectedRow?.totalImpressions ?? dashboard.totalImpressions)}</strong>
+              <strong>
+                {formatInt(selectedRow?.totalImpressions ?? dashboard.totalImpressions)}
+              </strong>
               <small>today {formatInt(selectedRow?.todayImpressions)}</small>
             </div>
             <div className="mail-dash__kpi-card">
               <span>CPM</span>
-              <strong>{formatUsd(selectedRow?.currentCPM ?? dashboard.overallCPM)}</strong>
+              <strong>
+                {formatUsd(selectedRow?.currentCPM ?? dashboard.overallCPM ?? dashboard.currentCPM)}
+              </strong>
               <small>overall</small>
             </div>
             <div className="mail-dash__kpi-card ok">
               <span>Wallet available</span>
               <strong>
                 {formatUsd(
-                  wallet.currentBalance != null && wallet.currentBalance !== ''
-                    ? wallet.currentBalance
-                    : selectedRow?.currentBalance,
+                  wallet.currentBalance != null ? wallet.currentBalance : selectedRow?.currentBalance,
                 )}
               </strong>
               <small>current balance</small>
@@ -333,9 +365,7 @@ export default function MailDashboard() {
               <span>Pending WD</span>
               <strong>
                 {formatUsd(
-                  wallet.pendingBalance != null && wallet.pendingBalance !== ''
-                    ? wallet.pendingBalance
-                    : selectedRow?.pendingBalance,
+                  wallet.pendingBalance != null ? wallet.pendingBalance : selectedRow?.pendingBalance,
                 )}
               </strong>
               <small>{formatInt(selectedRow?.withdrawalPending || withdrawals.filter((w) => statusClass(w.status) === 'warn').length)} requests</small>
@@ -344,9 +374,7 @@ export default function MailDashboard() {
               <span>Total withdrawn</span>
               <strong>
                 {formatUsd(
-                  wallet.totalWithdrawn != null && wallet.totalWithdrawn !== ''
-                    ? wallet.totalWithdrawn
-                    : selectedRow?.totalWithdrawn,
+                  wallet.totalWithdrawn != null ? wallet.totalWithdrawn : selectedRow?.totalWithdrawn,
                 )}
               </strong>
               <small>
@@ -382,7 +410,7 @@ export default function MailDashboard() {
                     </thead>
                     <tbody>
                       {withdrawals.map((w) => (
-                        <tr key={w.requestKey || `${w.createdAt}-${w.amount}`}>
+                        <tr key={w.requestKey}>
                           <td>{formatTs(w.createdAt)}</td>
                           <td>{formatUsd(w.amount)}</td>
                           <td>{w.method || '—'}</td>
@@ -517,15 +545,23 @@ export default function MailDashboard() {
               </div>
               <div>
                 <dt>Total earning</dt>
-                <dd>{formatUsd(selectedRow?.totalEarnings ?? dashboard.totalEarning ?? dashboard.totalEarnings)}</dd>
+                <dd>
+                  {formatUsd(
+                    dashboard.totalEarning ?? dashboard.totalEarnings ?? selectedRow?.totalEarnings,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>Total impressions</dt>
-                <dd>{formatInt(selectedRow?.totalImpressions ?? dashboard.totalImpressions)}</dd>
+                <dd>{formatInt(dashboard.totalImpressions ?? selectedRow?.totalImpressions)}</dd>
               </div>
               <div>
                 <dt>Overall CPM</dt>
-                <dd>{formatUsd(selectedRow?.currentCPM ?? dashboard.overallCPM ?? dashboard.currentCPM)}</dd>
+                <dd>
+                  {formatUsd(
+                    dashboard.overallCPM ?? dashboard.currentCPM ?? selectedRow?.currentCPM,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>Withdrawn (dash)</dt>
@@ -533,19 +569,35 @@ export default function MailDashboard() {
               </div>
               <div>
                 <dt>Available (dash)</dt>
-                <dd>{formatUsd(dashboard.totalavailable ?? dashboard.totalAvailable ?? selectedRow?.totalAvailable)}</dd>
+                <dd>
+                  {formatUsd(
+                    dashboard.totalavailable ?? dashboard.totalAvailable ?? selectedRow?.totalAvailable,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>Wallet current</dt>
-                <dd>{formatUsd(wallet.currentBalance ?? selectedRow?.currentBalance)}</dd>
+                <dd>
+                  {formatUsd(
+                    wallet.currentBalance != null ? wallet.currentBalance : selectedRow?.currentBalance,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>Wallet pending</dt>
-                <dd>{formatUsd(wallet.pendingBalance ?? selectedRow?.pendingBalance)}</dd>
+                <dd>
+                  {formatUsd(
+                    wallet.pendingBalance != null ? wallet.pendingBalance : selectedRow?.pendingBalance,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>Wallet withdrawn</dt>
-                <dd>{formatUsd(wallet.totalWithdrawn ?? selectedRow?.totalWithdrawn)}</dd>
+                <dd>
+                  {formatUsd(
+                    wallet.totalWithdrawn != null ? wallet.totalWithdrawn : selectedRow?.totalWithdrawn,
+                  )}
+                </dd>
               </div>
             </dl>
           </section>
