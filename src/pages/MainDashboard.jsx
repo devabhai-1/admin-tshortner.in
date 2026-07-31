@@ -95,6 +95,9 @@ export default function MainDashboard() {
           <Link to="/telegram-ids" className="main-dash__panel-btn tg">
             Telegram IDs
           </Link>
+          <Link to="/mail" className="main-dash__panel-btn mail">
+            Mail Dashboard
+          </Link>
           <Link to="/withdrawals" className="main-dash__panel-btn wd">
             Withdrawals
             {kpi.pendingWithdrawals > 0 ? (

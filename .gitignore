@@ -25,7 +25,3 @@ public/key.json
 *.njsproj
 *.sln
 *.sw?
-
-# env files
-.env
-.env.*

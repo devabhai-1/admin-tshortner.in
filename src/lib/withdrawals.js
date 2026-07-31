@@ -104,7 +104,13 @@ export function formatWithdrawalDate(ts) {
 
 export function formatAccountDetails(req) {
   if (!req) return '—'
-  if (req.method === 'Bank') {
+  const method = String(req.method || '').toLowerCase()
+  const isBank =
+    method === 'bank' ||
+    method.includes('bank') ||
+    Boolean(req.bankName || req.accountNumber || req.ifscCode || req.accountHolderName)
+
+  if (isBank) {
     const parts = [
       req.accountHolderName,
       req.bankName,

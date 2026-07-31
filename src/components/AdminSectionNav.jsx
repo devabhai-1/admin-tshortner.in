@@ -5,6 +5,7 @@ const LINKS = [
   { to: '/', label: 'Dashboard', end: true },
   { to: '/earning-users', label: 'All Users', end: false },
   { to: '/telegram-ids', label: 'Telegram IDs', end: false },
+  { to: '/mail', label: 'Mail Dashboard', end: false },
   { to: '/ga4', label: 'GA4 Analysis', end: false },
   { to: '/withdrawals', label: 'Withdrawals', end: false },
 ]
