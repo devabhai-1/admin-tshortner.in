@@ -355,6 +355,56 @@
   color: #e2e8f0;
 }
 
+.wd-account-cell {
+  max-width: 340px;
+  word-break: break-word;
+  font-size: 11px;
+  color: #cbd5e1;
+  vertical-align: top;
+}
+
+.wd-bank__summary {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e2e8f0;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.wd-bank__details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(8, 47, 73, 0.35);
+}
+
+.wd-bank__details dt {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  padding-top: 2px;
+}
+
+.wd-bank__details dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #f8fafc;
+  word-break: break-all;
+}
+
+.wd-bank__details dd.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  color: #bae6fd;
+  user-select: all;
+}
+
 .wd-table .empty td {
   text-align: center;
   color: #94a3b8;

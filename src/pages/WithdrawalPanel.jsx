@@ -20,6 +20,60 @@ import {
 import './WithdrawalPanel.css'
 import AdminSectionNav from '../components/AdminSectionNav.jsx'
 
+function isBankWithdrawal(row) {
+  const m = String(row?.method || '').toLowerCase()
+  return (
+    m === 'bank' ||
+    m.includes('bank') ||
+    Boolean(row?.bankName || row?.accountNumber || row?.ifscCode || row?.accountHolderName)
+  )
+}
+
+/** Pending approve ke liye full bank details (masked nahi). */
+function WithdrawalAccountCell({ row }) {
+  if (!isBankWithdrawal(row)) {
+    return <span>{row.account || formatAccountDetails(row) || '—'}</span>
+  }
+
+  return (
+    <div className="wd-bank">
+      <div className="wd-bank__summary">{formatAccountDetails(row)}</div>
+      <dl className="wd-bank__details">
+        {row.accountHolderName ? (
+          <>
+            <dt>Holder</dt>
+            <dd>{row.accountHolderName}</dd>
+          </>
+        ) : null}
+        {row.bankName ? (
+          <>
+            <dt>Bank</dt>
+            <dd>{row.bankName}</dd>
+          </>
+        ) : null}
+        {row.accountNumber ? (
+          <>
+            <dt>A/C No</dt>
+            <dd className="mono">{row.accountNumber}</dd>
+          </>
+        ) : null}
+        {row.ifscCode ? (
+          <>
+            <dt>IFSC</dt>
+            <dd className="mono">{row.ifscCode}</dd>
+          </>
+        ) : null}
+        {!row.accountHolderName && !row.bankName && !row.accountNumber && !row.ifscCode && row.account ? (
+          <>
+            <dt>Account</dt>
+            <dd>{row.account}</dd>
+          </>
+        ) : null}
+      </dl>
+    </div>
+  )
+}
+
 export default function WithdrawalPanel() {
   const { db, loading: fbLoading, error: fbError } = useFirebaseDb()
   const {
@@ -254,8 +308,8 @@ export default function WithdrawalPanel() {
           <div style={{ fontSize: '10px', color: '#94a3b8' }}>{row.currency || 'USD'}</div>
         </td>
         <td>{row.method || '—'}</td>
-        <td style={{ maxWidth: 280, wordBreak: 'break-word', fontSize: '11px', color: '#cbd5e1' }}>
-          {formatAccountDetails(row)}
+        <td className="wd-account-cell">
+          <WithdrawalAccountCell row={row} />
         </td>
         <td>
           <span className={statusBadgeClass(row.status)}>{withdrawalStatusLabel(row.status)}</span>
