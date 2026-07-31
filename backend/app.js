@@ -174,77 +174,60 @@ async function fetchWithRetry(url, retries = 2, delayMs = 1000) {
   throw new Error(`Fetch failed after ${retries} retries for ${url}`);
 }
 
-async function firebaseMapping() {
-  let refUsers = {};
-  let allLinks = {};
-  let success = false;
-
-  // Try REST API fetch first (highly reliable in proxy/container environments)
-  try {
-    const usersUrl = `${FIREBASE_DATABASE_URL}/users.json`;
-    const linksUrl = `${FIREBASE_DATABASE_URL}/allLinks.json`;
-    
-    console.log("Fetching Firebase mapping via REST API (with retry)...");
-    const [resUsers, resLinks] = await Promise.all([
-      fetchWithRetry(usersUrl, 2, 1000),
-      fetchWithRetry(linksUrl, 2, 1000)
-    ]);
-    
-    refUsers = await resUsers.json() || {};
-    allLinks = await resLinks.json() || {};
-    success = true;
-    console.log("✅ Firebase mapping fetched via REST API");
-  } catch (e) {
-    console.warn("⚠ REST API fetch error, falling back to Admin SDK:", e.message);
-  }
-
-  // Fallback to Firebase Admin SDK if REST API was not successful
-  if (!success) {
-    try {
-      if (!db) throw new Error("Firebase Admin DB not initialized");
-      const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Firebase Timeout")), ms));
-      const fetchWithTimeout = (ref) => Promise.race([db.ref(ref).once('value'), timeout(10000)]);
-      
-      console.log("Fetching Firebase mapping via Admin SDK...");
-      const refUsersSnap = await fetchWithTimeout("users");
-      refUsers = refUsersSnap.val() || {};
-      const allLinksSnap = await fetchWithTimeout("allLinks");
-      allLinks = allLinksSnap.val() || {};
-      console.log("✅ Firebase mapping fetched via Admin SDK");
-    } catch (e) {
-      console.error("❌ Firebase mapping error/timeout:", e.message);
-      return {};
-    }
-  }
-
-  try {
-    const mapping = {};
-    for (const emailKey in refUsers) {
-      const user = refUsers[emailKey];
-      if (typeof user !== 'object') continue;
+async function firebaseMappingFromAllLinks(allLinks) {
+  const mapping = {};
+  for (const code in allLinks || {}) {
+    const meta = allLinks[code];
+    if (!meta || typeof meta !== 'object') continue;
+    const lid = normalizeId(code);
+    if (!lid) continue;
+    const usersOn = meta.users || {};
+    for (const emailKey of Object.keys(usersOn)) {
       const email = decodeEmailKey(emailKey);
-      const codes = collectLinkCodesFromUser(user);
-
-      for (const code in allLinks) {
-        const meta = allLinks[code];
-        if (typeof meta !== 'object') continue;
-        const usersOn = meta.users || {};
-        if (usersOn[emailKey]) {
-          const lid = normalizeId(code);
-          if (lid) codes.add(lid);
-        }
-      }
-
-      if (codes.size === 0) continue;
-      mapping[email] = Array.from(codes).sort().map(c => ({ id: c, raw: c }));
+      if (!email) continue;
+      if (!mapping[email]) mapping[email] = [];
+      mapping[email].push({ id: lid, raw: String(code) });
     }
+  }
+  for (const email of Object.keys(mapping)) {
+    const seen = new Set();
+    mapping[email] = mapping[email].filter((ent) => {
+      if (seen.has(ent.id)) return false;
+      seen.add(ent.id);
+      return true;
+    }).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
+  return mapping;
+}
+
+async function firebaseMapping() {
+  // Fast path for Vercel/SSE: only allLinks.json (users.json is huge and stalls the stream)
+  try {
+    const linksUrl = `${FIREBASE_DATABASE_URL}/allLinks.json`;
+    console.log('Fetching Firebase allLinks via REST (fast map)...');
+    const resLinks = await fetchWithRetry(linksUrl, 2, 1000);
+    const allLinks = (await resLinks.json()) || {};
+    const mapping = await firebaseMappingFromAllLinks(allLinks);
+    console.log(`Fast Firebase map ready (${Object.keys(mapping).length} emails)`);
     return mapping;
   } catch (e) {
-    console.error("Error processing Firebase mapping:", e.message);
+    console.warn('⚠ Fast allLinks map failed:', e.message);
+  }
+
+  // Fallback: Admin SDK allLinks only
+  try {
+    if (!db) throw new Error('Firebase Admin DB not initialized');
+    const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase Timeout')), ms));
+    const snap = await Promise.race([db.ref('allLinks').once('value'), timeout(12000)]);
+    const allLinks = snap.val() || {};
+    const mapping = await firebaseMappingFromAllLinks(allLinks);
+    console.log(`Admin SDK allLinks map ready (${Object.keys(mapping).length} emails)`);
+    return mapping;
+  } catch (e) {
+    console.error('❌ Firebase mapping error/timeout:', e.message);
     return {};
   }
 }
-
 const FB_MAP_CACHE = { at: 0, data: null };
 const FB_MAP_TTL_SEC = parseFloat(process.env.FIREBASE_MAP_CACHE_SEC || '120');
 let FB_MAP_PROMISE = null;
@@ -642,8 +625,22 @@ app.get('/api/analytics/stream', async (req, res) => {
             page_size: Math.max(1, Math.min(GA4_PAGE_SIZE, 250000))
         });
 
-        const fbMap = await firebaseMappingCached(forceFb);
+        emit("progress", { phase: "mapping", message: "Loading Firebase link map…" });
+        const heartbeat = setInterval(() => {
+            emit("progress", { phase: "mapping", message: "Still loading map…" });
+        }, 4000);
+        let fbMap = {};
+        try {
+            fbMap = await firebaseMappingCached(forceFb);
+        } finally {
+            clearInterval(heartbeat);
+        }
         const lidLookup = linkIdToEmailLookup(fbMap);
+        emit("progress", {
+            phase: "ga4",
+            message: "Fetching GA4…",
+            map_emails: Object.keys(fbMap || {}).length
+        });
 
         let fetchedGaRowsCount = 0;
         let outputRowsCount = 0;

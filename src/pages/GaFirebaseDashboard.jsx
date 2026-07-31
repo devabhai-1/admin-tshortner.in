@@ -76,6 +76,8 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
     )
     const es = new EventSource(url, { withCredentials: false })
     let done = false
+    const collected = []
+    let lastMeta = null
 
     const close = () => {
       try {
@@ -97,7 +99,11 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
     es.addEventListener('rows', (ev) => {
       try {
         const data = JSON.parse(ev.data)
-        if (Array.isArray(data?.rows)) onRows?.(data.rows, data.meta || null)
+        if (Array.isArray(data?.rows) && data.rows.length) {
+          collected.push(...data.rows)
+          onRows?.(data.rows, data.meta || null)
+        }
+        if (data?.meta) lastMeta = data.meta
       } catch {
         /* ignore */
       }
@@ -108,15 +114,28 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
       close()
       try {
         const data = JSON.parse(ev.data)
-        resolve(data)
+        const rowsFromDone = Array.isArray(data?.rows) ? data.rows : []
+        const rows = rowsFromDone.length ? rowsFromDone : collected
+        resolve({
+          ...(data || {}),
+          rows,
+          meta: data?.meta || lastMeta,
+        })
       } catch (e) {
-        reject(e)
+        if (collected.length) resolve({ rows: collected, meta: lastMeta })
+        else reject(e)
       }
     })
 
     es.addEventListener('error', () => {
       if (done) return
       close()
+      // Keep partial stream data instead of hard-failing empty
+      if (collected.length) {
+        done = true
+        resolve({ rows: collected, meta: lastMeta, partial: true })
+        return
+      }
       reject(new Error('GA4 stream disconnected'))
     })
   })
@@ -382,16 +401,39 @@ export default function GaFirebaseDashboard() {
         })
       } catch (e) {
         console.error(e)
-        setGaMsg({
-          text: '❌ Error: ' + (e instanceof Error ? e.message : String(e)),
-          kind: 'err',
-        })
+        // Stream fail → normal JSON API fallback so UI still gets data
+        try {
+          setGaMsg({ text: '⟳ Stream fail — JSON API se load…', kind: 'neutral' })
+          const { rows: incoming, meta } = await fetchGaRange(startDate, endDate, { gaOnly })
+          setAnalyticsRows((prev) => replaceRowsInRange(prev, incoming, startDate, endDate))
+          try {
+            if (incoming.length) sessionStorage.setItem(cacheKey, JSON.stringify(incoming))
+          } catch {
+            /* ignore */
+          }
+          setGaMsg({
+            text: incoming.length
+              ? `✅ Loaded via fallback API (${incoming.length.toLocaleString('en-IN')} rows)`
+              : '⚠ Fallback API me bhi koi data nahi',
+            kind: incoming.length ? 'ok' : 'err',
+          })
+        } catch (e2) {
+          console.error(e2)
+          setGaMsg({
+            text:
+              '❌ Error: ' +
+              (e instanceof Error ? e.message : String(e)) +
+              ' | fallback: ' +
+              (e2 instanceof Error ? e2.message : String(e2)),
+            kind: 'err',
+          })
+        }
       } finally {
         setLoadingDate(null)
         setAnalyticsReady(true)
       }
     },
-    [panelMode],
+    [panelMode, fetchGaRange],
   )
 
   const loadSingleDate = useCallback(
