@@ -1,5 +1,5 @@
 // Service Worker - TShortner Admin PWA
-const CACHE_NAME = 'tshortner-admin-v2-shell'
+const CACHE_NAME = 'tshortner-admin-v3-shell'
 
 const PRECACHE_URLS = [
   '/',
@@ -58,44 +58,41 @@ self.addEventListener('fetch', (event) => {
 
   const path = url.pathname
 
-  // Never intercept API / SSE — must stay text/event-stream
+  // Never intercept API / SSE
   if (path.startsWith('/api/')) return
 
-  if (path.startsWith('/assets/')) {
-    event.respondWith(fetch(event.request))
-    return
-  }
-
-  if (path === '/sw.js') {
-    event.respondWith(fetch(event.request))
+  if (path.startsWith('/assets/') || path === '/sw.js') {
+    event.respondWith(fetch(event.request).catch(() => Response.error()))
     return
   }
 
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request)
-        .then((response) => response)
-        .catch(() => caches.match('/index.html').then((r) => r || caches.match('/'))),
+      fetch(event.request).catch(() =>
+        caches.match('/index.html').then((r) => r || caches.match('/') || Response.error()),
+      ),
     )
     return
   }
 
   const precachePath = PRECACHE_URLS.includes(path) || path === '/index.html'
   if (!precachePath) {
-    event.respondWith(fetch(event.request))
+    event.respondWith(fetch(event.request).catch(() => Response.error()))
     return
   }
 
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached
-      return fetch(event.request).then((response) => {
-        if (response && response.status === 200 && response.type === 'basic') {
-          const responseToCache = response.clone()
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache))
-        }
-        return response
-      })
+      return fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200 && response.type === 'basic') {
+            const responseToCache = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache))
+          }
+          return response
+        })
+        .catch(() => cached || Response.error())
     }),
   )
 })

@@ -744,9 +744,13 @@ app.get('/api/health', (req, res) => {
 });
 
 
-const PORT = process.env.PORT || 5005;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Listening http://0.0.0.0:${PORT} (cwd keys: ${__dirname})`);
-});
+// Vercel serverless: do not call listen() - export the app only.
+const isServerless = process.env.VERCEL === '1' || Boolean(process.env.VERCEL_ENV)
+if (!isServerless) {
+  const PORT = process.env.PORT || 5005
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Listening http://0.0.0.0:${PORT} (cwd keys: ${__dirname})`)
+  })
+}
 
-export default app;
+export default app
