@@ -3,9 +3,9 @@ import { ref, get } from 'firebase/database'
 import {
   appendWithdrawalsForUser,
   buildSingleUserOverviewRow,
-  insertOverviewRowSorted,
   replaceOverviewRowForUser,
   replaceWithdrawalsForUser,
+  sortOverviewRows,
   sortWithdrawalRequests,
 } from '../lib/buildUserOverviewRows.js'
 import { useFirebaseDb } from './FirebaseProvider.jsx'
@@ -22,48 +22,58 @@ import {
 } from './usersDataCache.js'
 import { usersDataSession } from './usersDataSession.js'
 
-const CHUNK_SIZE = 30
+/** Yield to UI without waiting a full animation frame (faster than rAF). */
+function yieldToMain() {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
 
+/**
+ * Fast path: one Firebase get + O(n) build + one O(n log n) sort.
+ * Avoids per-user binary-insert (was O(n²)) and tiny rAF chunks.
+ */
 async function fetchAndBuildUsers(db, onChunk) {
   const snap = await get(ref(db, 'users'))
   const val = snap.val()
   const entries = val && typeof val === 'object' ? Object.entries(val) : []
+  const total = entries.length
 
-  if (!entries.length) {
+  if (!total) {
     const empty = { usersVal: val, overviewRows: [], withdrawalRequests: [] }
     onChunk?.({ ...empty, loaded: 0, total: 0, streaming: false })
     return empty
   }
 
-  const acc = []
+  const overviewRows = new Array(total)
   const wdAcc = []
-  let index = 0
+  // Large batches keep UI responsive without slowing the build much
+  const BATCH = Math.max(400, Math.min(2000, Math.ceil(total / 4)))
 
-  while (index < entries.length) {
-    const end = Math.min(index + CHUNK_SIZE, entries.length)
-    for (let i = index; i < end; i += 1) {
-      const [emailKey, raw] = entries[i]
-      insertOverviewRowSorted(acc, buildSingleUserOverviewRow(emailKey, raw))
-      appendWithdrawalsForUser(wdAcc, emailKey, raw)
-    }
-    index = end
-    sortWithdrawalRequests(wdAcc)
-    onChunk?.({
-      usersVal: val,
-      overviewRows: [...acc],
-      withdrawalRequests: [...wdAcc],
-      loaded: end,
-      total: entries.length,
-      streaming: end < entries.length,
-    })
-    if (end < entries.length) {
-      await new Promise((resolve) => requestAnimationFrame(resolve))
+  for (let i = 0; i < total; i += 1) {
+    const [emailKey, raw] = entries[i]
+    overviewRows[i] = buildSingleUserOverviewRow(emailKey, raw)
+    appendWithdrawalsForUser(wdAcc, emailKey, raw)
+
+    const done = i + 1
+    if (done === total || done % BATCH === 0) {
+      if (done === total) {
+        sortOverviewRows(overviewRows)
+        sortWithdrawalRequests(wdAcc)
+      }
+      onChunk?.({
+        usersVal: val,
+        overviewRows: done === total ? overviewRows : overviewRows.slice(0, done),
+        withdrawalRequests: done === total ? wdAcc : wdAcc.slice(),
+        loaded: done,
+        total,
+        streaming: done < total,
+      })
+      if (done < total) await yieldToMain()
     }
   }
 
   return {
     usersVal: val,
-    overviewRows: acc,
+    overviewRows,
     withdrawalRequests: wdAcc,
   }
 }
@@ -118,7 +128,7 @@ export default function UsersDataProvider({ children }) {
   }, [])
 
   const runLoad = useCallback(
-    async (force = false) => {
+    async (force = false, { silent = false } = {}) => {
       if (!db) return
       if (!force && usersDataSession.loaded) {
         applyPayload(
@@ -147,23 +157,33 @@ export default function UsersDataProvider({ children }) {
         return
       }
 
-      setReloadBusy(true)
-      setStreamProgress({ loaded: 0, total: 0, streaming: true })
+      if (usersDataSession.loadPromise) {
+        await usersDataSession.loadPromise
+        if (!force) return
+      }
+
+      if (!silent) {
+        setReloadBusy(true)
+        setStreamProgress({ loaded: 0, total: 0, streaming: true })
+      }
 
       const task = (async () => {
         const built = await fetchAndBuildUsers(db, (chunk) => {
-          if (!mounted.current) return
+          if (!mounted.current || silent) return
           setStreamProgress({
             loaded: chunk.loaded,
             total: chunk.total,
             streaming: chunk.streaming,
           })
-          setOverviewRows(chunk.overviewRows)
-          setWithdrawalRequests(chunk.withdrawalRequests)
-          setUsersVal(chunk.usersVal)
-          setReady(true)
-          setFromCache(false)
-          setUpdateTick((n) => n + 1)
+          // Mid-stream paint only; final applyPayload does the last paint
+          if (chunk.streaming) {
+            setOverviewRows(chunk.overviewRows)
+            setWithdrawalRequests(chunk.withdrawalRequests)
+            setUsersVal(chunk.usersVal)
+            setReady(true)
+            setFromCache(false)
+            setUpdateTick((n) => n + 1)
+          }
         })
         commitUsersDataSession(built.overviewRows, built.withdrawalRequests, built.usersVal)
         applyPayload(built, { cached: false, streaming: false })
@@ -174,7 +194,7 @@ export default function UsersDataProvider({ children }) {
         await task
       } finally {
         usersDataSession.loadPromise = null
-        if (mounted.current) {
+        if (mounted.current && !silent) {
           setReloadBusy(false)
           setStreamProgress(null)
         }
@@ -187,6 +207,7 @@ export default function UsersDataProvider({ children }) {
     mounted.current = true
     if (!db) return undefined
 
+    // Instant paint from memory / sessionStorage, then silent background refresh
     if (usersDataSession.loaded || ensureSessionHydrated()) {
       applyPayload(
         {
@@ -196,6 +217,7 @@ export default function UsersDataProvider({ children }) {
         },
         { cached: true },
       )
+      void runLoad(true, { silent: true })
       return () => {
         mounted.current = false
       }
@@ -211,6 +233,7 @@ export default function UsersDataProvider({ children }) {
         },
         { cached: true },
       )
+      void runLoad(true, { silent: true })
       return () => {
         mounted.current = false
       }
@@ -225,7 +248,7 @@ export default function UsersDataProvider({ children }) {
 
   const refreshUsersData = useCallback(async () => {
     clearUsersDataCaches()
-    await runLoad(true)
+    await runLoad(true, { silent: false })
   }, [runLoad])
 
   const refreshUser = useCallback(

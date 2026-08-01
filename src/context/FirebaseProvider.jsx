@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useState } from 'react'
 import { getApps, initializeApp } from 'firebase/app'
 import { getDatabase } from 'firebase/database'
 import { FIREBASE_WEB_CONFIG } from '../lib/firebaseWebConfig.js'
@@ -9,8 +9,7 @@ const FirebaseContext = createContext({
   error: null,
 })
 
-async function loadFirebaseConfig() {
-  // 1) Vercel build-time env (optional override)
+function configFromEnv() {
   const envCfg = import.meta.env.VITE_FIREBASE_CONFIG
   if (envCfg && String(envCfg).trim()) {
     try {
@@ -20,7 +19,6 @@ async function loadFirebaseConfig() {
     }
   }
 
-  // 2) Individual env vars
   const apiKey = import.meta.env.VITE_FIREBASE_API_KEY
   const databaseURL = import.meta.env.VITE_FIREBASE_DATABASE_URL
   const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID
@@ -35,43 +33,32 @@ async function loadFirebaseConfig() {
       appId: import.meta.env.VITE_FIREBASE_APP_ID || undefined,
     }
   }
+  return null
+}
 
-  // 3) Local public/key.json (dev only — often missing on Vercel)
-  try {
-    const res = await fetch('/key.json', { cache: 'default' })
-    const contentType = res.headers.get('content-type') || ''
-    const text = await res.text()
-    if (res.ok && !contentType.includes('text/html') && !text.trimStart().startsWith('<!')) {
-      return JSON.parse(text)
-    }
-  } catch {
-    /* ignore */
-  }
+/** Sync config only — never block on /key.json network fetch. */
+function resolveFirebaseConfigSync() {
+  return configFromEnv() || FIREBASE_WEB_CONFIG
+}
 
-  // 4) Built-in public web config — works on Vercel without env
-  return FIREBASE_WEB_CONFIG
+function initDb(cfg) {
+  const app = getApps().length ? getApps()[0] : initializeApp(cfg)
+  return getDatabase(app)
 }
 
 export function FirebaseProvider({ children }) {
-  const [state, setState] = useState({ db: null, loading: true, error: null })
-
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const cfg = await loadFirebaseConfig()
-        const app = getApps().length ? getApps()[0] : initializeApp(cfg)
-        const db = getDatabase(app)
-        if (!cancelled) setState({ db, loading: false, error: null })
-      } catch (e) {
-        if (!cancelled)
-          setState({ db: null, loading: false, error: e instanceof Error ? e.message : String(e) })
+  const [state] = useState(() => {
+    try {
+      const cfg = resolveFirebaseConfigSync()
+      return { db: initDb(cfg), loading: false, error: null }
+    } catch (e) {
+      return {
+        db: null,
+        loading: false,
+        error: e instanceof Error ? e.message : String(e),
       }
-    })()
-    return () => {
-      cancelled = true
     }
-  }, [])
+  })
 
   return <FirebaseContext.Provider value={state}>{children}</FirebaseContext.Provider>
 }
