@@ -16,7 +16,7 @@ import {
   readDailyMap,
 } from '../lib/tshortnerSchema.js'
 import './GaFirebaseDashboard.css'
-import { apiUrl } from '../lib/api.js'
+import { apiFetch, apiStreamUrl } from '../lib/api.js'
 import AdminSectionNav from '../components/AdminSectionNav.jsx'
 import { formatUsd } from '../lib/withdrawals.js'
 
@@ -71,10 +71,10 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
 
     const modeQ = gaOnly ? '&mode=raw' : ''
     const mapQ = refreshMap ? '&refresh_map=1' : ''
-    const url = apiUrl(
+    const url = apiStreamUrl(
       `/api/analytics/stream?start_date=${startDate}&end_date=${endDate}${modeQ}${mapQ}`,
     )
-    const es = new EventSource(url, { withCredentials: false })
+    const es = new EventSource(url, { withCredentials: true })
     let done = false
     const collected = []
     let lastMeta = null
@@ -136,7 +136,7 @@ function streamGaRange(startDate, endDate, { gaOnly, refreshMap = false, onProgr
         resolve({ rows: collected, meta: lastMeta, partial: true })
         return
       }
-      reject(new Error('GA4 stream disconnected'))
+      reject(new Error('GA4 stream disconnected (check login / network)'))
     })
   })
 }
@@ -329,7 +329,7 @@ export default function GaFirebaseDashboard() {
     const modeQ = gaOnly ? '&mode=raw' : ''
     const mapQ = refreshMap ? '&refresh_map=1' : ''
     const apiPath = `/api/analytics?start_date=${startDate}&end_date=${endDate}${modeQ}${mapQ}`
-    const res = await fetch(apiUrl(apiPath))
+    const res = await apiFetch(apiPath)
     const data = await res.json()
     if (!res.ok) {
       const msg = typeof data?.error === 'string' ? data.error : 'HTTP ' + res.status

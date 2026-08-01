@@ -74,6 +74,32 @@
   border-color: rgba(56, 189, 248, 0.5);
 }
 
+.app-logout {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.35);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.app-logout:hover {
+  color: #fff;
+  background: rgba(185, 28, 28, 0.55);
+}
+
+.auth-boot {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  background: #0b1015;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .app-main {
   flex: 1 1 auto;
   width: 100%;

@@ -6,13 +6,45 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import dotenv from 'dotenv';
-dotenv.config();
+import {
+  clearAuthCookie,
+  credentialsConfigured,
+  requireAuth,
+  setAuthCookie,
+  signAdminToken,
+  verifyAdminCredentials,
+  verifyAdminToken,
+  extractToken,
+} from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load root .env then backend/.env (backend overrides)
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+dotenv.config({ path: path.join(__dirname, '.env') });
+
 const app = express();
-app.use(cors());
+app.disable('x-powered-by');
+app.use(cors({
+  origin: true,
+  credentials: true,
+}));
+app.use(express.json({ limit: '32kb' }));
+
+// Block probing of common sensitive paths
+app.use((req, res, next) => {
+  const p = (req.path || '').toLowerCase();
+  if (
+    p.includes('service_account') ||
+    p.endsWith('.env') ||
+    p.includes('node_modules') ||
+    p.includes('/backend/')
+  ) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 
 // --- Config ---
 const PROPERTY_ID = process.env.GA4_PROPERTY_ID || '469135333';
@@ -364,50 +396,160 @@ function rowsToOutput(gaRows, lidLookup, rawMode) {
     return out;
 }
 
-// --- Routes ---
-app.post('/api/login', express.json(), async (req, res) => {
-    const { username, password } = req.body;
-    
-    let ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
-    if (Array.isArray(ip)) ip = ip[0];
-    ip = ip.split(',')[0].trim();
-    const safeIp = ip.replace(/[.#$[\]\s]/g, '_');
-    
-    const today = formatDate(new Date());
-    let failedCount = 0;
-    
-    try {
-        if (db) {
-            const snap = await db.ref(`security/failed_logins/${today}/${safeIp}`).once('value');
-            failedCount = snap.val() || 0;
-        }
-    } catch (e) {
-        console.error("Firebase read error on login check", e);
-    }
-    
-    if (failedCount >= 10) {
-        return res.status(429).json({ 
-            success: false, 
-            error: 'Maximum attempts reached! Login is locked for today.' 
-        });
-    }
+// --- Auth routes (public) ---
+const loginFailMemory = new Map() // key -> { count, day }
 
-    if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
-        try {
-            if (db) await db.ref(`security/failed_logins/${today}/${safeIp}`).remove();
-        } catch (e) {}
-        return res.json({ success: true, token: 'admin-authorized-token' });
-    } else {
-        try {
-            if (db) await db.ref(`security/failed_logins/${today}/${safeIp}`).set(failedCount + 1);
-        } catch (e) {}
-        
-        const remaining = 10 - (failedCount + 1);
-        return res.status(401).json({ 
-            success: false, 
-            error: remaining > 0 ? `Invalid credentials. ${remaining} attempts remaining.` : 'Maximum attempts reached! Login is locked for today.'
-        });
+function memoryFailKey(day, ip) {
+    return `${day}:${ip}`
+}
+
+function getMemoryFails(day, ip) {
+    const key = memoryFailKey(day, ip)
+    const row = loginFailMemory.get(key)
+    if (!row || row.day !== day) return 0
+    return row.count || 0
+}
+
+function setMemoryFails(day, ip, count) {
+    loginFailMemory.set(memoryFailKey(day, ip), { day, count })
+}
+
+function clearMemoryFails(day, ip) {
+    loginFailMemory.delete(memoryFailKey(day, ip))
+}
+
+async function withTimeout(promise, ms, fallback) {
+    let timer
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('timeout')), ms)
+            }),
+        ])
+    } catch {
+        return fallback
+    } finally {
+        if (timer) clearTimeout(timer)
     }
+}
+
+app.post('/api/login', async (req, res) => {
+    try {
+        if (!credentialsConfigured()) {
+            return res.status(503).json({
+                success: false,
+                error: 'Admin auth is not configured. Set ADMIN_USERNAME, ADMIN_PASSWORD, and JWT_SECRET in .env',
+            });
+        }
+
+        const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+        const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+        let ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+        if (Array.isArray(ip)) ip = ip[0];
+        ip = String(ip).split(',')[0].trim();
+        const safeIp = ip.replace(/[.#$[\]\s]/g, '_');
+
+        const today = formatDate(new Date());
+        let failedCount = getMemoryFails(today, safeIp);
+
+        // Firebase rate-limit is best-effort only (never block login on RTDB hangs)
+        if (db) {
+            withTimeout(
+                db.ref(`security/failed_logins/${today}/${safeIp}`).once('value').then((s) => {
+                    const v = s.val() || 0
+                    if (typeof v === 'number' && v > getMemoryFails(today, safeIp)) {
+                        setMemoryFails(today, safeIp, v)
+                    }
+                }),
+                2000,
+                null,
+            ).catch(() => {})
+        }
+
+        if (failedCount >= 10) {
+            return res.status(429).json({
+                success: false,
+                error: 'Maximum attempts reached! Login is locked for today.',
+            });
+        }
+
+        let ok = false;
+        try {
+            ok = verifyAdminCredentials(username, password);
+        } catch (e) {
+            return res.status(503).json({ success: false, error: e.message });
+        }
+
+        if (ok) {
+            clearMemoryFails(today, safeIp);
+            if (db) {
+                withTimeout(db.ref(`security/failed_logins/${today}/${safeIp}`).remove(), 2000, null).catch(() => {})
+            }
+
+            const token = signAdminToken({ ip: safeIp });
+            setAuthCookie(res, token);
+            return res.json({ success: true, token });
+        }
+
+        const nextCount = failedCount + 1;
+        setMemoryFails(today, safeIp, nextCount);
+        if (db) {
+            withTimeout(
+                db.ref(`security/failed_logins/${today}/${safeIp}`).set(nextCount),
+                2000,
+                null,
+            ).catch(() => {})
+        }
+
+        const remaining = 10 - nextCount;
+        return res.status(401).json({
+            success: false,
+            error:
+                remaining > 0
+                    ? `Invalid credentials. ${remaining} attempts remaining.`
+                    : 'Maximum attempts reached! Login is locked for today.',
+        });
+    } catch (e) {
+        console.error(e);
+        return res.status(500).json({ success: false, error: 'Login failed' });
+    }
+});
+
+app.get('/api/auth/me', (req, res) => {
+    try {
+        if (!credentialsConfigured()) {
+            return res.status(503).json({ authenticated: false, error: 'Auth not configured' });
+        }
+        const token = extractToken(req);
+        const payload = verifyAdminToken(token);
+        if (!payload) {
+            return res.status(401).json({ authenticated: false });
+        }
+        return res.json({
+            authenticated: true,
+            user: payload.sub || process.env.ADMIN_USERNAME,
+            exp: payload.exp,
+        });
+    } catch (e) {
+        return res.status(503).json({ authenticated: false, error: e.message });
+    }
+});
+
+app.post('/api/logout', (req, res) => {
+    clearAuthCookie(res);
+    return res.json({ success: true });
+});
+
+// --- Protected API routes ---
+app.use('/api', (req, res, next) => {
+    // Public auth endpoints (already registered above; skip if somehow reached)
+    const p = req.path || ''
+    if (p === '/login' || p === '/auth/me' || p === '/logout' || p.endsWith('/login') || p.endsWith('/auth/me') || p.endsWith('/logout')) {
+        return next();
+    }
+    return requireAuth(req, res, next);
 });
 
 app.get('/api/analytics', async (req, res) => {
