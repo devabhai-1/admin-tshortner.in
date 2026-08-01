@@ -1,5 +1,5 @@
 // Service Worker - TShortner Admin PWA
-const CACHE_NAME = 'tshortner-admin-v4-shell'
+const CACHE_NAME = 'tshortner-admin-v5-shell'
 
 const PRECACHE_URLS = [
   '/',
@@ -23,6 +23,37 @@ function isFirebaseOrExternal(url) {
     u.includes('gstatic') ||
     (u.startsWith('http') && !u.startsWith(self.location.origin))
   )
+}
+
+/** SPA client routes like /login, /ga4 — no file extension */
+function isSpaPath(path) {
+  if (!path || path === '/') return true
+  const last = path.split('/').pop() || ''
+  return !last.includes('.')
+}
+
+function offlineResponse(message = 'Offline') {
+  return new Response(message, {
+    status: 503,
+    statusText: 'Service Unavailable',
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  })
+}
+
+async function spaShellFallback() {
+  const cached = (await caches.match('/index.html')) || (await caches.match('/'))
+  return cached || offlineResponse('App shell unavailable')
+}
+
+async function networkThenShell(request) {
+  try {
+    const res = await fetch(request)
+    // Vercel rewrite serves index.html for SPA routes — use it when OK
+    if (res && res.ok) return res
+  } catch {
+    /* network / SSO blip */
+  }
+  return spaShellFallback()
 }
 
 self.addEventListener('install', (event) => {
@@ -61,38 +92,42 @@ self.addEventListener('fetch', (event) => {
   // Never intercept API / SSE
   if (path.startsWith('/api/')) return
 
-  if (path.startsWith('/assets/') || path === '/sw.js') {
-    event.respondWith(fetch(event.request).catch(() => Response.error()))
-    return
-  }
+  // Let browser handle SW script itself
+  if (path === '/sw.js') return
 
-  if (event.request.mode === 'navigate') {
+  // Hashed assets: network only, soft fail (no Response.error())
+  if (path.startsWith('/assets/')) {
     event.respondWith(
-      fetch(event.request).catch(() =>
-        caches.match('/index.html').then((r) => r || caches.match('/') || Response.error()),
-      ),
+      fetch(event.request).catch(() => offlineResponse('Asset unavailable')),
     )
     return
   }
 
-  const precachePath = PRECACHE_URLS.includes(path) || path === '/index.html'
-  if (!precachePath) {
-    event.respondWith(fetch(event.request).catch(() => Response.error()))
+  // Navigations + SPA routes (/login, /ga4, …) → always fall back to app shell
+  if (event.request.mode === 'navigate' || event.request.destination === 'document' || isSpaPath(path)) {
+    event.respondWith(networkThenShell(event.request))
     return
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached
-      return fetch(event.request)
-        .then((response) => {
+  // Precached static files
+  if (PRECACHE_URLS.includes(path)) {
+    event.respondWith(
+      caches.match(event.request).then(async (cached) => {
+        try {
+          const response = await fetch(event.request)
           if (response && response.status === 200 && response.type === 'basic') {
-            const responseToCache = response.clone()
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache))
+            const copy = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy))
           }
           return response
-        })
-        .catch(() => cached || Response.error())
-    }),
-  )
+        } catch {
+          return cached || offlineResponse('Resource unavailable')
+        }
+      }),
+    )
+    return
+  }
+
+  // Everything else: network, never Response.error()
+  event.respondWith(fetch(event.request).catch(() => offlineResponse('Unavailable')))
 })
