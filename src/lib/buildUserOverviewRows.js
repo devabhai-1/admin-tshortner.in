@@ -195,6 +195,33 @@ export function sortByTotalImpressionsDesc(rows) {
   })
 }
 
+/**
+ * Total Bal $ (currentBalance) minus → list ke top.
+ * Sabse zyada minus pehle, phir baaki users zyada views se.
+ */
+export function sortDashboardRows(rows) {
+  return [...rows].sort((a, b) => {
+    const aBal = safeNum(a.currentBalance)
+    const bBal = safeNum(b.currentBalance)
+    const aNeg = aBal < 0
+    const bNeg = bBal < 0
+    // Minus Total Bal$ mails hamesha upar
+    if (aNeg !== bNeg) return aNeg ? -1 : 1
+    // Dono minus: sabse chhota (zyada minus) pehle
+    if (aNeg && bNeg) {
+      if (aBal !== bBal) return aBal - bBal
+    }
+    const views = safeNum(b.totalImpressions) - safeNum(a.totalImpressions)
+    if (views !== 0) return views
+    return safeNum(b.totalEarnings) - safeNum(a.totalEarnings)
+  })
+}
+
+/** Total Bal $ (currentBalance) negative? */
+export function isNegativeBalanceUser(row) {
+  return safeNum(row?.currentBalance) < 0
+}
+
 const BALANCE_MATCH_TOLERANCE = 0.02
 
 /** Expected wallet: Earn − Withdrawn. Diff = currentBalance − expected. */

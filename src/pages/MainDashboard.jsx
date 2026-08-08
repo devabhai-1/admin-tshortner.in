@@ -2,8 +2,9 @@ import { useDeferredValue, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useUsersData } from '../context/usersDataContext.js'
 import {
+  isNegativeBalanceUser,
   rowBalanceComparison,
-  sortByTotalImpressionsDesc,
+  sortDashboardRows,
   summarizeOverviewRows,
 } from '../lib/buildUserOverviewRows.js'
 import { formatInt, formatUsd } from '../lib/formatMoney.js'
@@ -42,16 +43,29 @@ export default function MainDashboard() {
   const [onlyActive, setOnlyActive] = useState(false)
   const [onlyPendingWd, setOnlyPendingWd] = useState(false)
   const [onlyMismatch, setOnlyMismatch] = useState(false)
+  const [onlyNegative, setOnlyNegative] = useState(false)
 
   const deferredSearch = useDeferredValue(search)
 
-  const sortedByViews = useMemo(
-    () => sortByTotalImpressionsDesc(overviewRows),
-    [overviewRows],
-  )
+  const sortedRows = useMemo(() => sortDashboardRows(overviewRows), [overviewRows])
+
+  const negativeStats = useMemo(() => {
+    const negRows = overviewRows
+      .filter((r) => isNegativeBalanceUser(r))
+      .sort((a, b) => safeNum(a.currentBalance) - safeNum(b.currentBalance))
+    let sum = 0
+    const emails = []
+    for (const r of negRows) {
+      sum += safeNum(r.currentBalance)
+      if (emails.length < 8) {
+        emails.push(`${r.email} (${formatUsd(r.currentBalance)})`)
+      }
+    }
+    return { count: negRows.length, sum, emails }
+  }, [overviewRows])
 
   const filtered = useMemo(() => {
-    let list = sortedByViews
+    let list = sortedRows
     const q = deferredSearch.trim().toLowerCase()
     if (q) {
       list = list.filter(
@@ -63,8 +77,10 @@ export default function MainDashboard() {
     if (onlyActive) list = list.filter((r) => r.isActive)
     if (onlyPendingWd) list = list.filter((r) => r.withdrawalPending > 0)
     if (onlyMismatch) list = list.filter((r) => !rowBalanceComparison(r).matches)
-    return list
-  }, [sortedByViews, deferredSearch, onlyActive, onlyPendingWd, onlyMismatch])
+    if (onlyNegative) list = list.filter((r) => isNegativeBalanceUser(r))
+    // Filter ke baad bhi Total Bal$ minus wale top pe
+    return sortDashboardRows(list)
+  }, [sortedRows, deferredSearch, onlyActive, onlyPendingWd, onlyMismatch, onlyNegative])
 
   const kpi = useMemo(() => summarizeOverviewRows(overviewRows), [overviewRows])
   const kpiVisible = useMemo(() => summarizeOverviewRows(filtered), [filtered])
@@ -91,7 +107,9 @@ export default function MainDashboard() {
     isStreaming && streamProgress
       ? `लोड हो रहा ${streamProgress.loaded.toLocaleString('en-IN')} / ${streamProgress.total.toLocaleString('en-IN')}`
       : ''
-  const filterOn = Boolean(search.trim() || onlyActive || onlyPendingWd || onlyMismatch)
+  const filterOn = Boolean(
+    search.trim() || onlyActive || onlyPendingWd || onlyMismatch || onlyNegative,
+  )
 
   return (
     <div className="main-dash">
@@ -108,7 +126,7 @@ export default function MainDashboard() {
             </span>
           </h1>
           <p>
-            Zyada views wale upar. Balance check: Earn − Withdrawn = expected · vs currentBalance.
+            Total Bal $ minus wali mails list ke top pe · phir zyada views.
             {isStreaming ? ` अभी: ${streamLabel}…` : ''}
             {sessionLoaded && !isStreaming ? ' · session saved.' : ''}
           </p>
@@ -134,6 +152,28 @@ export default function MainDashboard() {
           </Link>
         </div>
       </header>
+
+      {ready && negativeStats.count > 0 ? (
+        <div className="main-dash__neg-alert" role="status">
+          <strong>
+            ⚠ Total Bal $ minus: {formatInt(negativeStats.count)} mails · sum{' '}
+            {formatUsd(negativeStats.sum)}
+          </strong>
+          <span>
+            {negativeStats.emails.join(' · ')}
+            {negativeStats.count > negativeStats.emails.length
+              ? ` · +${negativeStats.count - negativeStats.emails.length} more`
+              : ''}
+          </span>
+          <button
+            type="button"
+            className="main-dash__neg-btn"
+            onClick={() => setOnlyNegative(true)}
+          >
+            Sirf minus Total Bal
+          </button>
+        </div>
+      ) : null}
 
       <div className="main-dash__kpi">
         <div className="main-dash__kpi-card">
@@ -163,6 +203,17 @@ export default function MainDashboard() {
           <span>Total balance ($)</span>
           <strong>{ready ? formatUsd(kpi.walletBalance) : '…'}</strong>
           <small>currentBalance sum</small>
+        </div>
+        <div className="main-dash__kpi-card bad">
+          <span>Total Bal $ minus</span>
+          <strong>{ready ? formatUsd(negativeStats.sum) : '…'}</strong>
+          <small>
+            {ready
+              ? negativeStats.count > 0
+                ? `${formatInt(negativeStats.count)} mails — table top pe`
+                : 'koi minus Total Bal nahi'
+              : '—'}
+          </small>
         </div>
         <div className="main-dash__kpi-card warn">
           <span>Pending balance ($)</span>
@@ -244,6 +295,14 @@ export default function MainDashboard() {
           />
           सिर्फ balance mismatch
         </label>
+        <label className="main-dash__chk">
+          <input
+            type="checkbox"
+            checked={onlyNegative}
+            onChange={(e) => setOnlyNegative(e.target.checked)}
+          />
+          सिर्फ minus balance
+        </label>
         <span className="main-dash__sync">
           {loadingFirst ? (
             '⏳ Firebase connect…'
@@ -256,7 +315,7 @@ export default function MainDashboard() {
                   {sessionLoaded ? '● Session' : '○'}
                 </span>
               )}{' '}
-              {filtered.length} / {overviewRows.length} users · views ↓
+              {filtered.length} / {overviewRows.length} users · minus pehle · views ↓
               {streamProgress?.total && isStreaming
                 ? ` (${Math.round((streamProgress.loaded / streamProgress.total) * 100)}%)`
                 : ''}
@@ -281,7 +340,7 @@ export default function MainDashboard() {
               <th>Today Views</th>
               <th>CPM ($)</th>
               <th>Expected $</th>
-              <th>Total Bal $</th>
+              <th title="currentBalance — minus wale top pe">Total Bal $ ↓</th>
               <th>Pending Bal $</th>
               <th>Withdrawn $</th>
               <th>Diff $</th>
@@ -319,11 +378,13 @@ export default function MainDashboard() {
             ) : (
               filtered.map((r, i) => {
                 const cmp = rowBalanceComparison(r)
+                const isNeg = isNegativeBalanceUser(r)
                 return (
                   <tr
                     key={r.emailKey}
                     className={
                       (r.withdrawalPending > 0 ? 'row-pending-wd ' : '') +
+                      (isNeg ? 'row-neg-bal ' : '') +
                       (cmp.matches ? '' : 'row-bal-mismatch')
                     }
                   >
@@ -347,10 +408,15 @@ export default function MainDashboard() {
                     <td title="Earn − Withdrawn">{formatUsd(cmp.expectedAvailable)}</td>
                     <td
                       className={
-                        'money ' + (safeNum(r.currentBalance) < 0 ? 'neg' : cmp.matches ? 'ok' : '')
+                        'money ' +
+                        (isNeg ? 'neg' : cmp.matches ? 'ok' : '')
                       }
                     >
-                      {formatUsd(r.currentBalance)}
+                      {isNeg ? (
+                        <strong className="neg-flag">{formatUsd(r.currentBalance)}</strong>
+                      ) : (
+                        formatUsd(r.currentBalance)
+                      )}
                     </td>
                     <td className="money warn">{formatUsd(r.pendingBalance)}</td>
                     <td>{formatUsd(r.totalWithdrawn)}</td>
@@ -382,7 +448,7 @@ export default function MainDashboard() {
               <tr className="main-dash__totals-row">
                 <td colSpan={5}>
                   TOTAL ({formatInt(kpiVisible.users)} users
-                  {filterOn ? ' — filtered' : ''} · views ↓)
+                  {filterOn ? ' — filtered' : ''} · minus pehle · views ↓)
                 </td>
                 <td>
                   <strong>{formatInt(kpiVisible.totalImpressions)}</strong>
