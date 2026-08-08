@@ -16,6 +16,7 @@ export const UsersDataContext = createContext({
   fbConnecting: false,
   refreshUsersData: async () => {},
   refreshUser: async () => {},
+  smartRepairAll: async () => ({ repaired: 0, scanned: 0, skipped: 0 }),
 })
 
 export function useUsersData() {

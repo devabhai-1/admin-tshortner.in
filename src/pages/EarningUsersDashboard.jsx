@@ -1,4 +1,5 @@
 import { useDeferredValue, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useUsersData } from '../context/usersDataContext.js'
 import {
   ELIGIBLE_MIN_EARNING_USD,
@@ -97,9 +98,12 @@ export default function EarningUsersDashboard() {
             </span>
           </h1>
           <p>
-            Sabhi {formatInt(overviewRows.length)} users — zyada earn wale upar. Har mail: Earn −
-            Withdrawn − Pending = Available. {formatInt(earnOver1Count)} users &gt; $
-            {ELIGIBLE_MIN_EARNING_USD} earn.
+            Sabhi {formatInt(overviewRows.length)} users — Earn = daily sum · Bal = Earn − WD −
+            Pending. {formatInt(earnOver1Count)} users &gt; ${ELIGIBLE_MIN_EARNING_USD} earn
+            {kpi.needsRepair > 0
+              ? ` · ${formatInt(kpi.needsRepair)} repair chahiye — `
+              : '.'}
+            {kpi.needsRepair > 0 ? <Link to="/">Smart Fix All</Link> : null}
             {isStreaming ? ` Abhi: ${streamLabel}…` : ''}
           </p>
         </div>
@@ -117,7 +121,18 @@ export default function EarningUsersDashboard() {
         <div className="earn-dash__kpi-card">
           <span>Total earnings ($)</span>
           <strong>{ready ? formatUsd(kpi.totalEarnings) : '…'}</strong>
-          <small>{ready ? `${formatInt(kpi.totalImpressions)} impressions` : '—'}</small>
+          <small>daily rows sum</small>
+        </div>
+        <div className={'earn-dash__kpi-card ' + (kpi.needsRepair > 0 ? 'warn' : 'ok')}>
+          <span>Needs repair</span>
+          <strong>{ready ? formatInt(kpi.needsRepair) : '…'}</strong>
+          <small>
+            {ready && kpi.needsRepair > 0 ? (
+              <Link to="/">Dashboard → Smart Fix</Link>
+            ) : (
+              'aligned'
+            )}
+          </small>
         </div>
         <div className="earn-dash__kpi-card ok">
           <span>Available balance ($)</span>

@@ -87,7 +87,7 @@ export function buildDashboardTotals(dailyMap) {
   }
 }
 
-/** Firebase multi-path update for one user + date */
+/** Firebase multi-path update for one user + date — saari summary aliases sync */
 export function dashboardUpdatePaths(emailKey, date, row, dailyMap) {
   const day = normalizeDailyRow(row)
   const totals = buildDashboardTotals(dailyMap)
@@ -97,7 +97,11 @@ export function dashboardUpdatePaths(emailKey, date, row, dailyMap) {
     [`${base}/dailyEarning`]: totals.dailyEarning,
     [`${base}/dailyCPM`]: totals.dailyCPM,
     [`${base}/totalEarning`]: totals.totalEarning,
+    [`${base}/totalEarnings`]: totals.totalEarnings,
+    [`${base}/totalAvailable`]: totals.totalAvailable,
+    [`${base}/totalavailable`]: totals.totalAvailable,
     [`${base}/totalImpressions`]: totals.totalImpressions,
     [`${base}/overallCPM`]: totals.overallCPM,
+    [`${base}/currentCPM`]: totals.currentCPM,
   }
 }

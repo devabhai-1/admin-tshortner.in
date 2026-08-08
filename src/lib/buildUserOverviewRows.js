@@ -1,4 +1,5 @@
 import { dashboardSummary, hasMeaningfulDashboardData } from './dashboardActivity.js'
+import { computeUserTrueEconomics } from './smartDashboardRepair.js'
 import { parseWithdrawalRequests, withdrawalStatusBucket } from './withdrawals.js'
 import { decodeEmailKey, safeNum } from './tshortnerSchema.js'
 
@@ -88,6 +89,7 @@ export function buildSingleUserOverviewRow(emailKey, raw) {
   const links = data.links || {}
   const dash = dashboardSummary(dashboard)
   const wd = quickWithdrawalStats(wallet.withdrawalRequests)
+  const eco = computeUserTrueEconomics(emailKey, data)
 
   return {
     emailKey,
@@ -105,6 +107,12 @@ export function buildSingleUserOverviewRow(emailKey, raw) {
     currentBalance: safeNum(wallet.currentBalance),
     pendingBalance: safeNum(wallet.pendingBalance),
     totalWithdrawn: safeNum(wallet.totalWithdrawn),
+    expectedBalance: eco.expectedBalance,
+    storedEarn: eco.storedEarn,
+    earnFromDaily: eco.fromDaily,
+    earnMismatch: eco.earnMismatch,
+    balanceMismatch: eco.balanceMismatch,
+    needsRepair: eco.needsRepair,
     withdrawalTotal: wd.total,
     withdrawalPending: wd.pending,
     withdrawalPendingAmt: wd.pendingAmt,
@@ -263,6 +271,9 @@ export function summarizeOverviewRows(rows) {
     telegramLinks: 0,
     websiteLinks: 0,
     avgCPM: 0,
+    needsRepair: 0,
+    earnMismatch: 0,
+    balanceMismatch: 0,
   }
   let cpmWeighted = 0
   let cpmWeight = 0
@@ -282,6 +293,9 @@ export function summarizeOverviewRows(rows) {
     out.withdrawalRejectedCount += r.withdrawalRejected
     out.telegramLinks += r.telegramLinks
     out.websiteLinks += r.websiteLinks
+    if (r.needsRepair) out.needsRepair += 1
+    if (r.earnMismatch) out.earnMismatch += 1
+    if (r.balanceMismatch) out.balanceMismatch += 1
     const imps = safeNum(r.totalImpressions)
     if (imps > 0) {
       cpmWeighted += safeNum(r.currentCPM) * imps

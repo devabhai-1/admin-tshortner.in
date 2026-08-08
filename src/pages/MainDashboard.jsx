@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useUsersData } from '../context/usersDataContext.js'
 import {
@@ -38,12 +38,17 @@ export default function MainDashboard() {
     fbConnecting,
     streamProgress,
     allUsersLoaded,
+    smartRepairAll,
   } = useUsersData()
   const [search, setSearch] = useState('')
   const [onlyActive, setOnlyActive] = useState(false)
   const [onlyPendingWd, setOnlyPendingWd] = useState(false)
   const [onlyMismatch, setOnlyMismatch] = useState(false)
   const [onlyNegative, setOnlyNegative] = useState(false)
+  const [onlyNeedsRepair, setOnlyNeedsRepair] = useState(false)
+  const [repairBusy, setRepairBusy] = useState(false)
+  const [repairProgress, setRepairProgress] = useState(null)
+  const [repairMsg, setRepairMsg] = useState('')
 
   const deferredSearch = useDeferredValue(search)
 
@@ -78,9 +83,18 @@ export default function MainDashboard() {
     if (onlyPendingWd) list = list.filter((r) => r.withdrawalPending > 0)
     if (onlyMismatch) list = list.filter((r) => !rowBalanceComparison(r).matches)
     if (onlyNegative) list = list.filter((r) => isNegativeBalanceUser(r))
+    if (onlyNeedsRepair) list = list.filter((r) => r.needsRepair)
     // Filter ke baad bhi Total Bal$ minus wale top pe
     return sortDashboardRows(list)
-  }, [sortedRows, deferredSearch, onlyActive, onlyPendingWd, onlyMismatch, onlyNegative])
+  }, [
+    sortedRows,
+    deferredSearch,
+    onlyActive,
+    onlyPendingWd,
+    onlyMismatch,
+    onlyNegative,
+    onlyNeedsRepair,
+  ])
 
   const kpi = useMemo(() => summarizeOverviewRows(overviewRows), [overviewRows])
   const kpiVisible = useMemo(() => summarizeOverviewRows(filtered), [filtered])
@@ -101,6 +115,39 @@ export default function MainDashboard() {
     }
   }, [kpiVisible, filtered])
 
+  const runSmartRepair = useCallback(async () => {
+    const n = kpi.needsRepair
+    if (!n) {
+      setRepairMsg('✓ Sab users already sahi — repair ki zarurat nahi')
+      return
+    }
+    const ok = window.confirm(
+      `${n} users repair:\n` +
+        `• Earn = daily rows sum (stale $323 → sahi $42)\n` +
+        `• Balance = Earn − Withdrawn − Pending\n\n` +
+        `Sirf mismatched users update honge. Continue?`,
+    )
+    if (!ok) return
+
+    setRepairBusy(true)
+    setRepairMsg('')
+    setRepairProgress({ done: 0, total: n })
+    try {
+      const result = await smartRepairAll((done, total) => {
+        setRepairProgress({ done, total })
+      })
+      setRepairMsg(
+        `✅ ${result.repaired} repaired · ${result.skipped} already ok · scanned ${result.scanned}`,
+      )
+      setOnlyNeedsRepair(false)
+    } catch (e) {
+      setRepairMsg('❌ ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setRepairBusy(false)
+      setRepairProgress(null)
+    }
+  }, [kpi.needsRepair, smartRepairAll])
+
   const isStreaming = streamProgress?.streaming === true
   const showTable = ready && overviewRows.length > 0
   const loadingFirst = !ready && fbConnecting
@@ -109,7 +156,12 @@ export default function MainDashboard() {
       ? `लोड हो रहा ${streamProgress.loaded.toLocaleString('en-IN')} / ${streamProgress.total.toLocaleString('en-IN')}`
       : ''
   const filterOn = Boolean(
-    search.trim() || onlyActive || onlyPendingWd || onlyMismatch || onlyNegative,
+    search.trim() ||
+      onlyActive ||
+      onlyPendingWd ||
+      onlyMismatch ||
+      onlyNegative ||
+      onlyNeedsRepair,
   )
 
   return (
@@ -127,12 +179,25 @@ export default function MainDashboard() {
             </span>
           </h1>
           <p>
-            Total Bal $ minus wali mails list ke top pe · phir zyada views.
+            Earn = daily sum · Balance = Earn − WD − Pending · minus Total Bal top pe.
             {isStreaming ? ` अभी: ${streamLabel}…` : ''}
             {sessionLoaded && !isStreaming ? ' · session saved.' : ''}
           </p>
         </div>
         <div className="main-dash__quick-links">
+          <button
+            type="button"
+            className="main-dash__panel-btn fix"
+            disabled={!ready || repairBusy || isStreaming || kpi.needsRepair === 0}
+            title="Stale earn + galat wallet — sirf mismatched users"
+            onClick={() => void runSmartRepair()}
+          >
+            {repairBusy && repairProgress
+              ? `Fix ${repairProgress.done}/${repairProgress.total}`
+              : kpi.needsRepair > 0
+                ? `Smart Fix All (${kpi.needsRepair})`
+                : 'Smart Fix ✓'}
+          </button>
           <Link to="/ga4" className="main-dash__panel-btn ga4">
             GA4 Analysis
           </Link>
@@ -153,6 +218,47 @@ export default function MainDashboard() {
           </Link>
         </div>
       </header>
+
+      {ready && kpi.needsRepair > 0 ? (
+        <div className="main-dash__repair-alert" role="status">
+          <strong>
+            ⚠ {formatInt(kpi.needsRepair)} users repair chahiye
+            {kpi.earnMismatch > 0 ? ` · ${formatInt(kpi.earnMismatch)} stale earn` : ''}
+            {kpi.balanceMismatch > 0 ? ` · ${formatInt(kpi.balanceMismatch)} wallet mismatch` : ''}
+          </strong>
+          <span>
+            Daily sum se earn sync + wallet = Earn − Withdrawn − Pending. Sirf galat users update.
+          </span>
+          <button
+            type="button"
+            className="main-dash__repair-btn"
+            disabled={repairBusy || isStreaming}
+            onClick={() => void runSmartRepair()}
+          >
+            {repairBusy && repairProgress
+              ? `⏳ ${repairProgress.done}/${repairProgress.total}`
+              : 'Smart Fix All'}
+          </button>
+          <button
+            type="button"
+            className="main-dash__neg-btn"
+            onClick={() => setOnlyNeedsRepair(true)}
+          >
+            Sirf repair list
+          </button>
+        </div>
+      ) : null}
+
+      {repairMsg ? (
+        <div
+          className={
+            'main-dash__repair-msg ' + (repairMsg.startsWith('❌') ? 'err' : 'ok')
+          }
+          role="status"
+        >
+          {repairMsg}
+        </div>
+      ) : null}
 
       {ready && negativeStats.count > 0 ? (
         <div className="main-dash__neg-alert" role="status">
@@ -198,7 +304,18 @@ export default function MainDashboard() {
         <div className="main-dash__kpi-card">
           <span>Total earnings ($)</span>
           <strong>{ready ? formatUsd(kpi.totalEarnings) : '…'}</strong>
-          <small>सभी users</small>
+          <small>daily rows sum</small>
+        </div>
+        <div className={'main-dash__kpi-card ' + (kpi.needsRepair > 0 ? 'warn' : 'ok')}>
+          <span>Needs repair</span>
+          <strong>{ready ? formatInt(kpi.needsRepair) : '…'}</strong>
+          <small>
+            {ready
+              ? kpi.needsRepair > 0
+                ? `${formatInt(kpi.earnMismatch)} earn · ${formatInt(kpi.balanceMismatch)} bal`
+                : 'sab aligned'
+              : '—'}
+          </small>
         </div>
         <div className="main-dash__kpi-card ok">
           <span>Total balance ($)</span>
@@ -304,6 +421,14 @@ export default function MainDashboard() {
           />
           सिर्फ minus balance
         </label>
+        <label className="main-dash__chk">
+          <input
+            type="checkbox"
+            checked={onlyNeedsRepair}
+            onChange={(e) => setOnlyNeedsRepair(e.target.checked)}
+          />
+          सिर्फ needs repair
+        </label>
         <span className="main-dash__sync">
           {loadingFirst ? (
             '⏳ Firebase connect…'
@@ -386,6 +511,7 @@ export default function MainDashboard() {
                     className={
                       (r.withdrawalPending > 0 ? 'row-pending-wd ' : '') +
                       (isNeg ? 'row-neg-bal ' : '') +
+                      (r.needsRepair ? 'row-needs-repair ' : '') +
                       (cmp.matches ? '' : 'row-bal-mismatch')
                     }
                   >
@@ -399,11 +525,25 @@ export default function MainDashboard() {
                       <span className={'main-dash__tag ' + (r.isActive ? 'active' : 'zero')}>
                         {r.isActive ? 'Active' : 'Zero'}
                       </span>
+                      {r.needsRepair ? (
+                        <span className="main-dash__tag repair" title="Stale earn ya wallet mismatch">
+                          Fix
+                        </span>
+                      ) : null}
                     </td>
                     <td>
                       <strong className="views-val">{formatInt(r.totalImpressions)}</strong>
                     </td>
-                    <td>{formatUsd(r.totalEarnings)}</td>
+                    <td
+                      title={
+                        r.earnMismatch
+                          ? `Stored ${formatUsd(r.storedEarn)} → daily ${formatUsd(r.totalEarnings)}`
+                          : 'daily sum'
+                      }
+                      className={r.earnMismatch ? 'earn-stale' : ''}
+                    >
+                      {formatUsd(r.totalEarnings)}
+                    </td>
                     <td>{formatInt(r.todayImpressions)}</td>
                     <td>{formatUsd(r.currentCPM)}</td>
                     <td title="Earn − Withdrawn − Pending">{formatUsd(cmp.expectedAvailable)}</td>

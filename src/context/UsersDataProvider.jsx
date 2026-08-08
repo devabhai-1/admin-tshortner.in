@@ -8,6 +8,7 @@ import {
   sortOverviewRows,
   sortWithdrawalRequests,
 } from '../lib/buildUserOverviewRows.js'
+import { smartRepairAllUsers } from '../lib/smartDashboardRepair.js'
 import { useFirebaseDb } from './FirebaseProvider.jsx'
 import { UsersDataContext } from './usersDataContext.js'
 import {
@@ -282,6 +283,23 @@ export default function UsersDataProvider({ children }) {
     [db],
   )
 
+  /** Daily sum → dashboard totals + wallet = Earn − WD − Pending (sirf mismatched users) */
+  const smartRepairAll = useCallback(
+    async (onProgress) => {
+      if (!db) return { repaired: 0, scanned: 0, skipped: 0 }
+      let source = usersVal || usersDataSession.usersVal
+      if (!source) {
+        const snap = await get(ref(db, 'users'))
+        source = snap.val()
+      }
+      const result = await smartRepairAllUsers(db, source, onProgress)
+      clearUsersDataCaches()
+      await runLoad(true, { silent: false })
+      return result
+    },
+    [db, usersVal, runLoad],
+  )
+
   const value = useMemo(
     () => ({
       usersVal,
@@ -303,6 +321,7 @@ export default function UsersDataProvider({ children }) {
       fbConnecting: fbLoading && !ready,
       refreshUsersData,
       refreshUser,
+      smartRepairAll,
     }),
     [
       usersVal,
@@ -319,6 +338,7 @@ export default function UsersDataProvider({ children }) {
       fbLoading,
       refreshUsersData,
       refreshUser,
+      smartRepairAll,
     ],
   )
 

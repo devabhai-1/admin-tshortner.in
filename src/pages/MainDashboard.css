@@ -124,6 +124,20 @@
   border-color: rgba(167, 139, 250, 0.5);
 }
 
+.main-dash__panel-btn.fix {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.35), rgba(251, 146, 60, 0.18));
+  color: #ffedd5;
+  border-color: rgba(251, 146, 60, 0.55);
+  cursor: pointer;
+  font: inherit;
+}
+
+.main-dash__panel-btn.fix:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .main-dash__panel-btn.wd {
   background: linear-gradient(90deg, rgba(34, 197, 94, 0.2), rgba(74, 222, 128, 0.12));
   color: #dcfce7;
@@ -334,6 +348,81 @@
   border-bottom: 1px solid rgba(248, 113, 113, 0.45);
   color: #fecaca;
   font-size: 13px;
+}
+
+.main-dash__repair-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 12px 16px;
+  background: rgba(120, 53, 15, 0.4);
+  border-bottom: 1px solid rgba(251, 146, 60, 0.45);
+  color: #fed7aa;
+  font-size: 13px;
+}
+
+.main-dash__repair-alert strong {
+  color: #fdba74;
+  font-weight: 800;
+}
+
+.main-dash__repair-alert span {
+  flex: 1 1 200px;
+  font-size: 12px;
+  opacity: 0.95;
+}
+
+.main-dash__repair-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 146, 60, 0.55);
+  background: rgba(194, 65, 12, 0.55);
+  color: #ffedd5;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.main-dash__repair-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.main-dash__repair-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.main-dash__repair-msg {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.main-dash__repair-msg.ok {
+  background: rgba(22, 101, 52, 0.35);
+  color: #bbf7d0;
+}
+
+.main-dash__repair-msg.err {
+  background: rgba(127, 29, 29, 0.35);
+  color: #fecaca;
+}
+
+.main-dash__table tbody tr.row-needs-repair {
+  background: rgba(251, 146, 60, 0.08);
+}
+
+.main-dash__tag.repair {
+  margin-left: 6px;
+  background: rgba(194, 65, 12, 0.45);
+  color: #ffedd5;
+}
+
+.main-dash__table td.earn-stale {
+  color: #fdba74;
+  font-weight: 700;
 }
 
 .main-dash__neg-alert strong {

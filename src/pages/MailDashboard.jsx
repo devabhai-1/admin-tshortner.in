@@ -1,7 +1,11 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ref, update } from 'firebase/database'
+import { useFirebaseDb } from '../context/FirebaseProvider.jsx'
 import { useUsersData } from '../context/usersDataContext.js'
 import { dashboardSummary } from '../lib/dashboardActivity.js'
 import { formatInt, formatUsd } from '../lib/formatMoney.js'
+import { buildSmartRepairPaths } from '../lib/smartDashboardRepair.js'
 import { readDailyMap, safeNum } from '../lib/tshortnerSchema.js'
 import {
   formatAccountDetails,
@@ -97,6 +101,7 @@ function statusClass(status) {
 }
 
 export default function MailDashboard() {
+  const { db } = useFirebaseDb()
   const {
     usersVal,
     overviewRows,
@@ -116,9 +121,15 @@ export default function MailDashboard() {
   const [selectedKey, setSelectedKey] = useState('')
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
+  const [fixBusy, setFixBusy] = useState(false)
+  const [fixMsg, setFixMsg] = useState('')
   const deferredSearch = useDeferredValue(search)
 
   const isStreaming = streamProgress?.streaming === true
+
+  useEffect(() => {
+    setFixMsg('')
+  }, [selectedKey])
 
   // Cache me full usersVal nahi hota — mail select par Firebase se poora node lao
   useEffect(() => {
@@ -213,6 +224,28 @@ export default function MailDashboard() {
     isStreaming && streamProgress
       ? `${formatInt(streamProgress.loaded)} / ${formatInt(streamProgress.total)} users`
       : ''
+
+  const fixThisUser = useCallback(async () => {
+    if (!db || !selectedKey || !rawUser) return
+    setFixBusy(true)
+    setFixMsg('')
+    try {
+      const { paths, eco, skip } = buildSmartRepairPaths(selectedKey, rawUser)
+      if (skip || !eco.needsRepair) {
+        setFixMsg('✓ Is mail pe pehle se sahi data hai')
+        return
+      }
+      await update(ref(db), paths)
+      await refreshUser(selectedKey)
+      setFixMsg(
+        `✅ Fixed · earn ${formatUsd(eco.trueEarn)} · bal ${formatUsd(eco.expectedBalance)}`,
+      )
+    } catch (e) {
+      setFixMsg('❌ ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setFixBusy(false)
+    }
+  }, [db, selectedKey, rawUser, refreshUser])
 
   return (
     <div className="mail-dash">
@@ -394,14 +427,29 @@ export default function MailDashboard() {
             </div>
           </div>
 
-          {storedEarnMismatch ? (
+          {storedEarnMismatch || selectedRow?.needsRepair ? (
             <div className="mail-dash__mismatch" role="status">
-              <strong>⚠ Stale dashboard total</strong>
+              <strong>⚠ Stale / mismatch — repair chahiye</strong>
               <span>
-                Daily sum = {formatUsd(storedEarnMismatch.dailyEarn)} · Firebase stored Available/Earn
-                = {formatUsd(storedEarnMismatch.stored)} — galat bada number. Sahi earn daily sum hai.
-                Withdrawals → Load + Analysis → सभी Update se wallet + summary repair ho jayega.
+                {storedEarnMismatch
+                  ? `Daily sum = ${formatUsd(storedEarnMismatch.dailyEarn)} · stored Earn/Available = ${formatUsd(storedEarnMismatch.stored)}. `
+                  : ''}
+                Wallet = Earn − Withdrawn − Pending. Is mail pe Fix dabao, ya Dashboard pe{' '}
+                <Link to="/">Smart Fix All</Link>.
               </span>
+              <button
+                type="button"
+                className="mail-dash__fix-btn"
+                disabled={fixBusy || !db}
+                onClick={() => void fixThisUser()}
+              >
+                {fixBusy ? '⏳ Fix…' : 'Fix this mail'}
+              </button>
+              {fixMsg ? <em className="mail-dash__fix-msg">{fixMsg}</em> : null}
+            </div>
+          ) : fixMsg ? (
+            <div className="mail-dash__mismatch ok" role="status">
+              {fixMsg}
             </div>
           ) : null}
 

@@ -1,8 +1,14 @@
 import { usersDataSession } from './usersDataSession.js'
 
-const OVERVIEW_CACHE_KEY = 'tshortner.admin.overview.v5'
-const WITHDRAWAL_CACHE_KEY = 'tshortner.admin.withdrawals.v2'
-const FETCHED_ONCE_KEY = 'tshortner.admin.fetchedOnce.v1'
+const OVERVIEW_CACHE_KEY = 'tshortner.admin.overview.v7'
+const WITHDRAWAL_CACHE_KEY = 'tshortner.admin.withdrawals.v3'
+const FETCHED_ONCE_KEY = 'tshortner.admin.fetchedOnce.v2'
+const LEGACY_CACHE_KEYS = [
+  'tshortner.admin.overview.v6',
+  'tshortner.admin.overview.v5',
+  'tshortner.admin.withdrawals.v2',
+  'tshortner.admin.fetchedOnce.v1',
+]
 
 export function readOverviewCache() {
   try {
@@ -63,6 +69,7 @@ export function clearUsersDataCaches() {
     sessionStorage.removeItem(OVERVIEW_CACHE_KEY)
     sessionStorage.removeItem(WITHDRAWAL_CACHE_KEY)
     sessionStorage.removeItem(FETCHED_ONCE_KEY)
+    for (const k of LEGACY_CACHE_KEYS) sessionStorage.removeItem(k)
   } catch {
     /* ignore */
   }

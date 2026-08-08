@@ -1,14 +1,12 @@
 import { useCallback, useMemo, useState } from 'react'
 import { ref, get, update } from 'firebase/database'
 import { useFirebaseDb } from '../context/FirebaseProvider.jsx'
-import { clearUsersDataCaches } from '../context/usersDataCache.js'
 import { useUsersData } from '../context/usersDataContext.js'
 import { usersDataSession } from '../context/usersDataSession.js'
 import { summarizeOverviewRows } from '../lib/buildUserOverviewRows.js'
 import { formatInt, formatUsd } from '../lib/formatMoney.js'
 import { safeNum, toFixed2 } from '../lib/tshortnerSchema.js'
 import { computeWithdrawalAnalysis } from '../lib/withdrawalAnalysis.js'
-import { syncAllWalletBalancesFromAnalysis } from '../lib/withdrawalWalletSync.js'
 import {
   formatAccountDetails,
   formatWithdrawalDate,
@@ -86,6 +84,7 @@ export default function WithdrawalPanel() {
     updateTick,
     refreshUser,
     refreshUsersData,
+    smartRepairAll,
     allUsersLoaded,
   } = useUsersData()
   const isStreaming = streamProgress?.streaming === true
@@ -146,46 +145,42 @@ export default function WithdrawalPanel() {
 
   const updateAllWallets = useCallback(async () => {
     if (!db) return
+    const needFix = walletTotals.needsRepair
     const count = analysis.users.length
-    if (!count) {
+    if (!count && !needFix) {
       setMsg({ text: '⚠ Pehle Load + Analysis chalao — koi user nahi', kind: 'err' })
       return
     }
 
     const beforeActual = analysis.global.actualAvailable
     const setTarget = analysis.global.setTotalCurrent
+    const fixHint = needFix > 0 ? needFix : analysis.mismatches.length
 
     const ok = window.confirm(
-      `${count} users — har email par:\n` +
-        `1) currentBalance = Earn − Withdrawn − Pending\n` +
-        `2) dashboard totalEarning/Available = daily sum (stale repair)\n\n` +
-        `Example: daily $42 − WD $38.90 − pending $0 = bal $3.18\n` +
-        `(purana galat $323 Available fix)\n\n` +
+      `Smart repair (~${fixHint} mismatched):\n` +
+        `1) dashboard earn = daily rows sum\n` +
+        `2) currentBalance = Earn − Withdrawn − Pending\n\n` +
+        `Example: daily $42 − WD − pending = sahi bal (stale $323 fix)\n\n` +
         `Abhi Actual total: ${formatUsd(beforeActual)}\n` +
-        `Update ke baad hoga: ${formatUsd(setTarget)}\n\nContinue?`,
+        `Analysis target: ${formatUsd(setTarget)}\n\nContinue?`,
     )
     if (!ok) return
 
     setUpdateAllBusy(true)
-    setUpdateProgress({ done: 0, total: count })
-    setMsg({ text: `⏳ ${count} users wallet SET…`, kind: 'neutral' })
+    setUpdateProgress({ done: 0, total: fixHint || count })
+    setMsg({ text: `⏳ Smart repair…`, kind: 'neutral' })
 
     try {
-      clearUsersDataCaches()
-      const { updated } = await syncAllWalletBalancesFromAnalysis(
-        db,
-        analysis.users,
-        (done, total) => setUpdateProgress({ done, total }),
+      const { repaired, scanned, skipped } = await smartRepairAll((done, total) =>
+        setUpdateProgress({ done, total }),
       )
-      clearUsersDataCaches()
-      await refreshUsersData()
       const after = computeWithdrawalAnalysis(
         usersDataSession.overviewRows,
         usersDataSession.withdrawalRequests,
       )
       setMsg({
         text:
-          `✅ ${updated} users SET · Actual ${formatUsd(beforeActual)} → ${formatUsd(after.global.actualAvailable)} · target ${formatUsd(setTarget)}`,
+          `✅ ${repaired} repaired · ${skipped} ok · scanned ${scanned} · Actual ${formatUsd(beforeActual)} → ${formatUsd(after.global.actualAvailable)}`,
         kind: 'ok',
       })
     } catch (e) {
@@ -198,7 +193,7 @@ export default function WithdrawalPanel() {
       setUpdateAllBusy(false)
       setUpdateProgress(null)
     }
-  }, [db, analysis.users, refreshUsersData])
+  }, [db, analysis, walletTotals.needsRepair, smartRepairAll])
 
   const totalWalletUsd = walletTotals.walletBalance + walletTotals.walletPending
 
@@ -482,8 +477,8 @@ export default function WithdrawalPanel() {
             <div>
               <h2>Balance Analysis</h2>
               <p className="wd-analysis__formula">
-                Har user: Earn − Withdrawn − Pending → currentBalance (REPLACE). Example: 2000 −
-                1700 − 200 = $100
+                Smart repair: daily earn sum + currentBalance = Earn − Withdrawn − Pending. Sirf
+                mismatched users.
               </p>
             </div>
             <div className="wd-analysis__actions">
@@ -499,14 +494,19 @@ export default function WithdrawalPanel() {
                 type="button"
                 className="wd-analysis__update-btn"
                 disabled={
-                  updateAllBusy || analysisLoading || isStreaming || !analysis.users.length
+                  updateAllBusy ||
+                  analysisLoading ||
+                  isStreaming ||
+                  (!analysis.users.length && !walletTotals.needsRepair)
                 }
-                title="Sabhi users: currentBalance = Earn − Withdrawn − Pending"
+                title="Sirf mismatched: earn=daily sum, bal=Earn−WD−Pending"
                 onClick={() => void updateAllWallets()}
               >
                 {updateAllBusy && updateProgress
-                  ? `⏳ Update ${updateProgress.done}/${updateProgress.total}`
-                  : 'सभी Update'}
+                  ? `⏳ Fix ${updateProgress.done}/${updateProgress.total}`
+                  : walletTotals.needsRepair > 0
+                    ? `Smart Fix (${walletTotals.needsRepair})`
+                    : 'Smart Fix ✓'}
               </button>
             </div>
           </div>
