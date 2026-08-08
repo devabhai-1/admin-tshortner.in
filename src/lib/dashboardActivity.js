@@ -1,23 +1,37 @@
 import { buildDashboardTotals, readDailyMap } from './tshortnerSchema.js'
 import { safeNum } from './utils.js'
 
+/**
+ * Dashboard totals — jab daily/{date} data ho to WAHI source of truth.
+ * Stale totalEarning / totalAvailable / totalEarnings fields ignore
+ * (e.g. daily sum $42 but totalAvailable $323 → use $42).
+ */
 export function dashboardSummary(dashboard) {
   const d = dashboard || {}
-  let totalEarnings = safeNum(d.totalEarnings ?? d.totalEarning)
-  let totalImpressions = safeNum(d.totalImpressions)
-  let todayImpressions = safeNum(d.todayImpressions)
-  let currentCPM = safeNum(d.currentCPM ?? d.overallCPM)
-  let totalAvailable = safeNum(d.totalavailable ?? d.totalAvailable ?? d.totalEarning ?? d.totalEarnings)
-
   const daily = readDailyMap(d)
-  if (Object.keys(daily).length > 0) {
+  const hasDaily = Object.keys(daily).length > 0
+
+  if (hasDaily) {
     const t = buildDashboardTotals(daily)
-    if (totalEarnings <= 0) totalEarnings = t.totalEarnings
-    if (totalImpressions <= 0) totalImpressions = t.totalImpressions
-    if (todayImpressions <= 0) todayImpressions = t.todayImpressions
-    if (currentCPM <= 0) currentCPM = t.currentCPM
-    if (totalAvailable <= 0) totalAvailable = t.totalAvailable
+    return {
+      totalImpressions: t.totalImpressions,
+      totalEarnings: t.totalEarnings,
+      todayImpressions: t.todayImpressions,
+      currentCPM: t.currentCPM,
+      totalAvailable: t.totalAvailable,
+      fromDaily: true,
+      storedTotalEarning: safeNum(d.totalEarning ?? d.totalEarnings),
+      storedTotalAvailable: safeNum(d.totalavailable ?? d.totalAvailable),
+    }
   }
+
+  const totalEarnings = safeNum(d.totalEarnings ?? d.totalEarning)
+  const totalImpressions = safeNum(d.totalImpressions)
+  const todayImpressions = safeNum(d.todayImpressions)
+  const currentCPM = safeNum(d.currentCPM ?? d.overallCPM)
+  const totalAvailable = safeNum(
+    d.totalavailable ?? d.totalAvailable ?? d.totalEarning ?? d.totalEarnings,
+  )
 
   return {
     totalImpressions,
@@ -25,6 +39,9 @@ export function dashboardSummary(dashboard) {
     todayImpressions,
     currentCPM,
     totalAvailable,
+    fromDaily: false,
+    storedTotalEarning: totalEarnings,
+    storedTotalAvailable: totalAvailable,
   }
 }
 

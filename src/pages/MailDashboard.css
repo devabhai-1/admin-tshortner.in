@@ -271,6 +271,24 @@
   color: #fbbf24;
 }
 
+.mail-dash__mismatch {
+  margin: 0 16px 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(127, 29, 29, 0.35);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fecaca;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mail-dash__mismatch strong {
+  color: #fca5a5;
+  font-weight: 800;
+}
+
 .mail-dash__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

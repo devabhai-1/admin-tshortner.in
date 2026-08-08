@@ -1,7 +1,8 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useUsersData } from '../context/usersDataContext.js'
+import { dashboardSummary } from '../lib/dashboardActivity.js'
 import { formatInt, formatUsd } from '../lib/formatMoney.js'
-import { readDailyMap } from '../lib/tshortnerSchema.js'
+import { readDailyMap, safeNum } from '../lib/tshortnerSchema.js'
 import {
   formatAccountDetails,
   parseWithdrawalRequests,
@@ -181,6 +182,19 @@ export default function MailDashboard() {
       .sort((a, b) => b.date.localeCompare(a.date))
   }, [dashboard])
 
+  const dashSum = useMemo(() => dashboardSummary(dashboard), [dashboard])
+
+  const storedEarnMismatch = useMemo(() => {
+    if (!dashSum.fromDaily) return null
+    const stored = Math.max(
+      safeNum(dashboard.totalEarning ?? dashboard.totalEarnings),
+      safeNum(dashboard.totalavailable ?? dashboard.totalAvailable),
+    )
+    const dailyEarn = safeNum(dashSum.totalEarnings)
+    if (Math.abs(stored - dailyEarn) <= 0.05) return null
+    return { stored, dailyEarn }
+  }, [dashSum, dashboard])
+
   const withdrawals = useMemo(() => {
     const fromWallet = parseWithdrawalRequests(wallet.withdrawalRequests)
     if (fromWallet.length > 0) {
@@ -331,26 +345,22 @@ export default function MailDashboard() {
           <div className="mail-dash__kpi">
             <div className="mail-dash__kpi-card highlight">
               <span>Total earnings</span>
-              <strong>
-                {formatUsd(
-                  selectedRow?.totalEarnings ?? dashboard.totalEarning ?? dashboard.totalEarnings,
-                )}
-              </strong>
-              <small>dashboard total</small>
+              <strong>{formatUsd(dashSum.totalEarnings)}</strong>
+              <small>
+                {dashSum.fromDaily
+                  ? `daily rows sum · ${formatInt(dailyRows.length)} days`
+                  : 'dashboard total'}
+              </small>
             </div>
             <div className="mail-dash__kpi-card">
               <span>Impressions</span>
-              <strong>
-                {formatInt(selectedRow?.totalImpressions ?? dashboard.totalImpressions)}
-              </strong>
-              <small>today {formatInt(selectedRow?.todayImpressions)}</small>
+              <strong>{formatInt(dashSum.totalImpressions)}</strong>
+              <small>today {formatInt(dashSum.todayImpressions)}</small>
             </div>
             <div className="mail-dash__kpi-card">
               <span>CPM</span>
-              <strong>
-                {formatUsd(selectedRow?.currentCPM ?? dashboard.overallCPM ?? dashboard.currentCPM)}
-              </strong>
-              <small>overall</small>
+              <strong>{formatUsd(dashSum.currentCPM)}</strong>
+              <small>overall from daily</small>
             </div>
             <div className="mail-dash__kpi-card ok">
               <span>Wallet available</span>
@@ -383,6 +393,17 @@ export default function MailDashboard() {
               </small>
             </div>
           </div>
+
+          {storedEarnMismatch ? (
+            <div className="mail-dash__mismatch" role="status">
+              <strong>⚠ Stale dashboard total</strong>
+              <span>
+                Daily sum = {formatUsd(storedEarnMismatch.dailyEarn)} · Firebase stored Available/Earn
+                = {formatUsd(storedEarnMismatch.stored)} — galat bada number. Sahi earn daily sum hai.
+                Withdrawals → Load + Analysis → सभी Update se wallet + summary repair ho jayega.
+              </span>
+            </div>
+          ) : null}
 
           <div className="mail-dash__grid">
             <section className="mail-dash__panel">
@@ -544,34 +565,44 @@ export default function MailDashboard() {
                 <dd>{formatUsd(dashboard.dailyCPM)}</dd>
               </div>
               <div>
-                <dt>Total earning</dt>
+                <dt>Total earning (daily sum)</dt>
+                <dd>{formatUsd(dashSum.totalEarnings)}</dd>
+              </div>
+              <div>
+                <dt>Stored totalEarning</dt>
                 <dd>
-                  {formatUsd(
-                    dashboard.totalEarning ?? dashboard.totalEarnings ?? selectedRow?.totalEarnings,
-                  )}
+                  {formatUsd(dashboard.totalEarning ?? dashboard.totalEarnings)}
+                  {storedEarnMismatch ? ' ⚠' : ''}
                 </dd>
               </div>
               <div>
                 <dt>Total impressions</dt>
-                <dd>{formatInt(dashboard.totalImpressions ?? selectedRow?.totalImpressions)}</dd>
+                <dd>{formatInt(dashSum.totalImpressions)}</dd>
               </div>
               <div>
                 <dt>Overall CPM</dt>
-                <dd>
-                  {formatUsd(
-                    dashboard.overallCPM ?? dashboard.currentCPM ?? selectedRow?.currentCPM,
-                  )}
-                </dd>
+                <dd>{formatUsd(dashSum.currentCPM)}</dd>
               </div>
               <div>
                 <dt>Withdrawn (dash)</dt>
                 <dd>{formatUsd(dashboard.withdrawnAmount ?? selectedRow?.withdrawnAmount)}</dd>
               </div>
               <div>
-                <dt>Available (dash)</dt>
+                <dt>Available stored</dt>
                 <dd>
                   {formatUsd(
                     dashboard.totalavailable ?? dashboard.totalAvailable ?? selectedRow?.totalAvailable,
+                  )}
+                  {storedEarnMismatch ? ' ⚠ stale' : ''}
+                </dd>
+              </div>
+              <div>
+                <dt>Expected bal (Earn−WD−Pend)</dt>
+                <dd>
+                  {formatUsd(
+                    safeNum(dashSum.totalEarnings) -
+                      safeNum(wallet.totalWithdrawn) -
+                      safeNum(wallet.pendingBalance),
                   )}
                 </dd>
               </div>

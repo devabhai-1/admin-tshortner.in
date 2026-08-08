@@ -157,11 +157,12 @@ export default function WithdrawalPanel() {
 
     const ok = window.confirm(
       `${count} users — har email par:\n` +
-        `currentBalance = Earn − Withdrawn − Pending (REPLACE)\n\n` +
-        `Example: 2000 − 1700 − 200 = $100 (pending balance me nahi jodenge)\n\n` +
+        `1) currentBalance = Earn − Withdrawn − Pending\n` +
+        `2) dashboard totalEarning/Available = daily sum (stale repair)\n\n` +
+        `Example: daily $42 − WD $38.90 − pending $0 = bal $3.18\n` +
+        `(purana galat $323 Available fix)\n\n` +
         `Abhi Actual total: ${formatUsd(beforeActual)}\n` +
-        `Update ke baad hoga: ${formatUsd(setTarget)}\n` +
-        `(Plus nahi — purana number badal jayega)\n\nContinue?`,
+        `Update ke baad hoga: ${formatUsd(setTarget)}\n\nContinue?`,
     )
     if (!ok) return
 
