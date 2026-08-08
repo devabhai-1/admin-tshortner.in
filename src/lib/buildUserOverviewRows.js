@@ -186,6 +186,35 @@ export function sortByTotalEarningsDesc(rows) {
   return [...rows].sort((a, b) => safeNum(b.totalEarnings) - safeNum(a.totalEarnings))
 }
 
+/** Zyada views/impressions wale upar. */
+export function sortByTotalImpressionsDesc(rows) {
+  return [...rows].sort((a, b) => {
+    const d = safeNum(b.totalImpressions) - safeNum(a.totalImpressions)
+    if (d !== 0) return d
+    return safeNum(b.totalEarnings) - safeNum(a.totalEarnings)
+  })
+}
+
+const BALANCE_MATCH_TOLERANCE = 0.02
+
+/** Expected wallet: Earn − Withdrawn. Diff = currentBalance − expected. */
+export function rowBalanceComparison(row) {
+  const earn = safeNum(row?.totalEarnings)
+  const withdrawn = safeNum(row?.totalWithdrawn)
+  const current = safeNum(row?.currentBalance)
+  const pending = safeNum(row?.pendingBalance)
+  const expected = earn - withdrawn
+  const diff = current - expected
+  return {
+    expectedAvailable: expected,
+    currentBalance: current,
+    pendingBalance: pending,
+    totalBalance: current + pending,
+    diff,
+    matches: Math.abs(diff) <= BALANCE_MATCH_TOLERANCE,
+  }
+}
+
 /** @param {ReturnType<typeof buildUserOverviewRows>} rows */
 export function summarizeOverviewRows(rows) {
   const out = {
