@@ -77,7 +77,9 @@ export default function EarningUsersDashboard() {
 
   const kpi = useMemo(() => summarizeOverviewRows(overviewRows), [overviewRows])
   const kpiFiltered = useMemo(() => summarizeOverviewRows(filtered), [filtered])
-  const earnMinusWd = kpiFiltered.totalEarnings - kpiFiltered.totalWithdrawn
+  const earnMinusWd =
+    kpiFiltered.totalEarnings - kpiFiltered.totalWithdrawn - kpiFiltered.walletPending
+  const earnMinusWdOnly = kpiFiltered.totalEarnings - kpiFiltered.totalWithdrawn
 
   const streamLabel =
     isStreaming && streamProgress
@@ -96,7 +98,8 @@ export default function EarningUsersDashboard() {
           </h1>
           <p>
             Sabhi {formatInt(overviewRows.length)} users — zyada earn wale upar. Har mail: Earn −
-            Withdrawn = Available. {formatInt(earnOver1Count)} users &gt; ${ELIGIBLE_MIN_EARNING_USD} earn.
+            Withdrawn − Pending = Available. {formatInt(earnOver1Count)} users &gt; $
+            {ELIGIBLE_MIN_EARNING_USD} earn.
             {isStreaming ? ` Abhi: ${streamLabel}…` : ''}
           </p>
         </div>
@@ -185,11 +188,16 @@ export default function EarningUsersDashboard() {
       {ready ? (
         <p className="earn-dash__filter-note">
           Shown total: Earn {formatUsd(kpiFiltered.totalEarnings)} − Withdrawn{' '}
-          {formatUsd(kpiFiltered.totalWithdrawn)} = {formatUsd(earnMinusWd)} · Available jod{' '}
+          {formatUsd(kpiFiltered.totalWithdrawn)} − Pending{' '}
+          {formatUsd(kpiFiltered.walletPending)} = {formatUsd(earnMinusWd)} · Available jod{' '}
           {formatUsd(kpiFiltered.walletBalance)}
           {Math.abs(earnMinusWd - kpiFiltered.walletBalance) > 0.02
             ? ` · diff ${formatUsd(kpiFiltered.walletBalance - earnMinusWd)}`
             : ' · match ✓'}
+          {' · '}
+          (Earn−WD only {formatUsd(earnMinusWdOnly)} = Bal+Pending{' '}
+          {formatUsd(kpiFiltered.totalBalance)}
+          {Math.abs(earnMinusWdOnly - kpiFiltered.totalBalance) > 0.02 ? ' ✗' : ' ✓'})
         </p>
       ) : null}
 
