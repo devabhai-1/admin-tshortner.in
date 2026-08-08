@@ -206,6 +206,30 @@ export default function MailDashboard() {
     return { stored, dailyEarn }
   }, [dashSum, dashboard])
 
+  const walletCheck = useMemo(() => {
+    const earn = safeNum(dashSum.totalEarnings)
+    const withdrawn = safeNum(
+      wallet.totalWithdrawn != null ? wallet.totalWithdrawn : selectedRow?.totalWithdrawn,
+    )
+    const pending = safeNum(
+      wallet.pendingBalance != null ? wallet.pendingBalance : selectedRow?.pendingBalance,
+    )
+    const current = safeNum(
+      wallet.currentBalance != null ? wallet.currentBalance : selectedRow?.currentBalance,
+    )
+    const expected = earn - withdrawn - pending
+    const diff = current - expected
+    return {
+      earn,
+      withdrawn,
+      pending,
+      current,
+      expected,
+      diff,
+      matches: Math.abs(diff) <= 0.02,
+    }
+  }, [dashSum.totalEarnings, wallet, selectedRow])
+
   const withdrawals = useMemo(() => {
     const fromWallet = parseWithdrawalRequests(wallet.withdrawalRequests)
     if (fromWallet.length > 0) {
@@ -377,12 +401,12 @@ export default function MailDashboard() {
 
           <div className="mail-dash__kpi">
             <div className="mail-dash__kpi-card highlight">
-              <span>Total earnings</span>
-              <strong>{formatUsd(dashSum.totalEarnings)}</strong>
+              <span>Total earnings (lifetime)</span>
+              <strong>{formatUsd(walletCheck.earn)}</strong>
               <small>
                 {dashSum.fromDaily
                   ? `daily rows sum · ${formatInt(dailyRows.length)} days`
-                  : 'dashboard total'}
+                  : 'stored dashboard field'}
               </small>
             </div>
             <div className="mail-dash__kpi-card">
@@ -396,35 +420,49 @@ export default function MailDashboard() {
               <small>overall from daily</small>
             </div>
             <div className="mail-dash__kpi-card ok">
-              <span>Wallet available</span>
-              <strong>
-                {formatUsd(
-                  wallet.currentBalance != null ? wallet.currentBalance : selectedRow?.currentBalance,
-                )}
-              </strong>
-              <small>current balance</small>
+              <span>Wallet balance (withdrawable)</span>
+              <strong>{formatUsd(walletCheck.current)}</strong>
+              <small>currentBalance — earn ka leftover</small>
             </div>
             <div className="mail-dash__kpi-card warn">
               <span>Pending WD</span>
-              <strong>
-                {formatUsd(
-                  wallet.pendingBalance != null ? wallet.pendingBalance : selectedRow?.pendingBalance,
-                )}
-              </strong>
-              <small>{formatInt(selectedRow?.withdrawalPending || withdrawals.filter((w) => statusClass(w.status) === 'warn').length)} requests</small>
+              <strong>{formatUsd(walletCheck.pending)}</strong>
+              <small>
+                {formatInt(
+                  selectedRow?.withdrawalPending ||
+                    withdrawals.filter((w) => statusClass(w.status) === 'warn').length,
+                )}{' '}
+                requests
+              </small>
             </div>
             <div className="mail-dash__kpi-card">
-              <span>Total withdrawn</span>
-              <strong>
-                {formatUsd(
-                  wallet.totalWithdrawn != null ? wallet.totalWithdrawn : selectedRow?.totalWithdrawn,
-                )}
-              </strong>
+              <span>Total withdrawn (paid)</span>
+              <strong>{formatUsd(walletCheck.withdrawn)}</strong>
               <small>
                 {formatInt(selectedRow?.withdrawalApproved || 0)} paid ·{' '}
                 {formatInt(selectedRow?.withdrawalRejected || 0)} rejected
               </small>
             </div>
+          </div>
+
+          <div
+            className={'mail-dash__formula ' + (walletCheck.matches ? 'ok' : 'bad')}
+            role="status"
+          >
+            <strong>
+              Earn {formatUsd(walletCheck.earn)} − WD {formatUsd(walletCheck.withdrawn)} − Pending{' '}
+              {formatUsd(walletCheck.pending)} = {formatUsd(walletCheck.expected)}
+            </strong>
+            <span>
+              Wallet {formatUsd(walletCheck.current)}
+              {walletCheck.matches
+                ? ' · ✓ Match — ye mail sahi hai'
+                : ` · ✗ Diff ${formatUsd(walletCheck.diff)}`}
+            </span>
+            <em>
+              Note: “Total earnings $849” lifetime earn hai, wallet nahi. Withdrawable = leftover
+              after paid WD.
+            </em>
           </div>
 
           {storedEarnMismatch || selectedRow?.needsRepair ? (
@@ -636,7 +674,7 @@ export default function MailDashboard() {
                 <dd>{formatUsd(dashboard.withdrawnAmount ?? selectedRow?.withdrawnAmount)}</dd>
               </div>
               <div>
-                <dt>Available stored</dt>
+                <dt>Stored totalAvailable (= lifetime earn, NOT wallet)</dt>
                 <dd>
                   {formatUsd(
                     dashboard.totalavailable ?? dashboard.totalAvailable ?? selectedRow?.totalAvailable,
@@ -646,13 +684,7 @@ export default function MailDashboard() {
               </div>
               <div>
                 <dt>Expected bal (Earn−WD−Pend)</dt>
-                <dd>
-                  {formatUsd(
-                    safeNum(dashSum.totalEarnings) -
-                      safeNum(wallet.totalWithdrawn) -
-                      safeNum(wallet.pendingBalance),
-                  )}
-                </dd>
+                <dd>{formatUsd(walletCheck.expected)}</dd>
               </div>
               <div>
                 <dt>Wallet current</dt>

@@ -271,6 +271,39 @@
   color: #fbbf24;
 }
 
+.mail-dash__formula {
+  margin: 0 16px 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mail-dash__formula.ok {
+  background: rgba(22, 101, 52, 0.32);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  color: #bbf7d0;
+}
+
+.mail-dash__formula.bad {
+  background: rgba(127, 29, 29, 0.35);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fecaca;
+}
+
+.mail-dash__formula strong {
+  font-weight: 800;
+  color: inherit;
+}
+
+.mail-dash__formula em {
+  font-style: normal;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
 .mail-dash__mismatch {
   margin: 0 16px 4px;
   padding: 12px 14px;
