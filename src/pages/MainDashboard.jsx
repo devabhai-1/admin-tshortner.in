@@ -86,7 +86,8 @@ export default function MainDashboard() {
   const kpiVisible = useMemo(() => summarizeOverviewRows(filtered), [filtered])
 
   const balanceCmp = useMemo(() => {
-    const expected = kpiVisible.totalEarnings - kpiVisible.totalWithdrawn
+    const expected =
+      kpiVisible.totalEarnings - kpiVisible.totalWithdrawn - kpiVisible.walletPending
     const diff = kpiVisible.walletBalance - expected
     let mismatchUsers = 0
     for (const r of filtered) {
@@ -235,8 +236,8 @@ export default function MainDashboard() {
         <div className={'main-dash__balance-cmp ' + (balanceCmp.matches ? 'ok' : 'bad')}>
           <span>Balance comparison (shown rows):</span>
           <strong>
-            Earn {formatUsd(kpiVisible.totalEarnings)} − WD {formatUsd(kpiVisible.totalWithdrawn)} ={' '}
-            {formatUsd(balanceCmp.expected)}
+            Earn {formatUsd(kpiVisible.totalEarnings)} − WD {formatUsd(kpiVisible.totalWithdrawn)} −
+            Pending {formatUsd(kpiVisible.walletPending)} = {formatUsd(balanceCmp.expected)}
           </strong>
           <strong>Wallet bal {formatUsd(kpiVisible.walletBalance)}</strong>
           <strong>
@@ -405,7 +406,7 @@ export default function MainDashboard() {
                     <td>{formatUsd(r.totalEarnings)}</td>
                     <td>{formatInt(r.todayImpressions)}</td>
                     <td>{formatUsd(r.currentCPM)}</td>
-                    <td title="Earn − Withdrawn">{formatUsd(cmp.expectedAvailable)}</td>
+                    <td title="Earn − Withdrawn − Pending">{formatUsd(cmp.expectedAvailable)}</td>
                     <td
                       className={
                         'money ' +

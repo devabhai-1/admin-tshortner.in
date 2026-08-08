@@ -157,7 +157,8 @@ export default function WithdrawalPanel() {
 
     const ok = window.confirm(
       `${count} users — har email par:\n` +
-        `currentBalance = Earn − totalWithdrawn (REPLACE)\n\n` +
+        `currentBalance = Earn − Withdrawn − Pending (REPLACE)\n\n` +
+        `Example: 2000 − 1700 − 200 = $100 (pending balance me nahi jodenge)\n\n` +
         `Abhi Actual total: ${formatUsd(beforeActual)}\n` +
         `Update ke baad hoga: ${formatUsd(setTarget)}\n` +
         `(Plus nahi — purana number badal jayega)\n\nContinue?`,
@@ -480,7 +481,8 @@ export default function WithdrawalPanel() {
             <div>
               <h2>Balance Analysis</h2>
               <p className="wd-analysis__formula">
-                Har user: Earn − Withdrawn → currentBalance · Total = $1318… (REPLACE)
+                Har user: Earn − Withdrawn − Pending → currentBalance (REPLACE). Example: 2000 −
+                1700 − 200 = $100
               </p>
             </div>
             <div className="wd-analysis__actions">
@@ -498,7 +500,7 @@ export default function WithdrawalPanel() {
                 disabled={
                   updateAllBusy || analysisLoading || isStreaming || !analysis.users.length
                 }
-                title="Sabhi users: currentBalance = Dashboard Avail − Approved WD"
+                title="Sabhi users: currentBalance = Earn − Withdrawn − Pending"
                 onClick={() => void updateAllWallets()}
               >
                 {updateAllBusy && updateProgress
@@ -522,12 +524,21 @@ export default function WithdrawalPanel() {
                 wallet paid · requests audit {formatUsd(analysis.global.totalApprovedFromRequests)}
               </small>
             </div>
+            <span className="wd-analysis__op">−</span>
+            <div className="wd-analysis__step warn">
+              <span>Pending hold ($)</span>
+              <strong>{formatUsd(analysis.global.totalPendingHold)}</strong>
+              <small>
+                pendingBalance / pending WD · audit{' '}
+                {formatUsd(analysis.global.totalPendingFromRequests)}
+              </small>
+            </div>
             <span className="wd-analysis__op">=</span>
             <div className="wd-analysis__step ok">
               <span>currentBalance ($) — SET total</span>
               <strong>{formatUsd(analysis.global.setTotalCurrent)}</strong>
               <small>
-                Earn − Withdrawn (sab users jod) = formula {formatUsd(analysis.global.formulaBalance)}
+                Earn − WD − Pending = formula {formatUsd(analysis.global.formulaBalance)}
                 {Math.abs(analysis.global.formulaVsSetDiff) <= 0.02
                   ? ' · match ✓'
                   : ` · Δ ${formatUsd(analysis.global.formulaVsSetDiff)}`}
@@ -593,6 +604,7 @@ export default function WithdrawalPanel() {
                   <th>Email</th>
                   <th>Dash Earn ($)</th>
                   <th>Withdrawn ($)</th>
+                  <th>Pending ($)</th>
                   <th>Expected ($)</th>
                   <th>Pehle ($)</th>
                   <th>Update ±</th>
@@ -604,7 +616,7 @@ export default function WithdrawalPanel() {
               <tbody>
                 {!ready || analysisLoading ? (
                   <tr>
-                    <td colSpan={9} className="empty">
+                    <td colSpan={10} className="empty">
                       {analysisLoading
                         ? '⏳ सभी users load…'
                         : '↑ सभी Load + Analysis दबाएँ'}
@@ -612,7 +624,7 @@ export default function WithdrawalPanel() {
                   </tr>
                 ) : !analysisUsers.length ? (
                   <tr>
-                    <td colSpan={9} className="empty">
+                    <td colSpan={10} className="empty">
                       {showAllAnalysisUsers
                         ? 'Koi user nahi'
                         : 'Sab users match — koi mismatch nahi'}
@@ -624,6 +636,7 @@ export default function WithdrawalPanel() {
                       <td className="email">{u.email}</td>
                       <td>{formatUsd(u.dashboardEarn)}</td>
                       <td>{formatUsd(u.walletWithdrawn)}</td>
+                      <td className="warn">{formatUsd(u.pendingHold)}</td>
                       <td className="ok">{formatUsd(u.expectedAvailable)}</td>
                       <td>{formatUsd(u.walletAvailable)}</td>
                       <td
@@ -659,6 +672,9 @@ export default function WithdrawalPanel() {
                     </td>
                     <td>
                       <strong>{formatUsd(analysis.global.totalWalletWithdrawn)}</strong>
+                    </td>
+                    <td>
+                      <strong>{formatUsd(analysis.global.totalPendingHold)}</strong>
                     </td>
                     <td>
                       <strong>{formatUsd(analysis.global.setTotalCurrent)}</strong>

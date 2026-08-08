@@ -224,13 +224,13 @@ export function isNegativeBalanceUser(row) {
 
 const BALANCE_MATCH_TOLERANCE = 0.02
 
-/** Expected wallet: Earn − Withdrawn. Diff = currentBalance − expected. */
+/** Expected wallet: Earn − Withdrawn − Pending. Diff = currentBalance − expected. */
 export function rowBalanceComparison(row) {
   const earn = safeNum(row?.totalEarnings)
   const withdrawn = safeNum(row?.totalWithdrawn)
   const current = safeNum(row?.currentBalance)
   const pending = safeNum(row?.pendingBalance)
-  const expected = earn - withdrawn
+  const expected = earn - withdrawn - pending
   const diff = current - expected
   return {
     expectedAvailable: expected,

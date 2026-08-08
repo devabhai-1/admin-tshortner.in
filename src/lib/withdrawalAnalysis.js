@@ -41,9 +41,19 @@ function sumRequestAmountsForUser(requests, emailKey) {
 }
 
 /**
- * Sync (ADD/plus nahi — poora REPLACE):
- *   currentBalance = Dashboard Earn − wallet.totalWithdrawn
- * pendingBalance alag rehti hai, is formula me nahi.
+ * Pending hold: wallet.pendingBalance ya pending requests — jo bada ho.
+ * (Dono me se missing side ignore na ho.)
+ */
+export function resolvePendingHold(walletPending, pendingFromRequests) {
+  return toFixed2(Math.max(safeNum(walletPending), safeNum(pendingFromRequests)))
+}
+
+/**
+ * Sync SET target:
+ *   currentBalance = Earn − totalWithdrawn − pendingHold
+ *
+ * Example: Earn 2000, Withdrawn 1700, Pending 200 → Balance 100 (not 300).
+ * pendingBalance alag rehti hai — sirf currentBalance SET hota hai.
  */
 export function analyzeUserWithdrawalBalance(row, requestTotals) {
   const dashboardEarn = safeNum(row?.totalEarnings)
@@ -54,12 +64,13 @@ export function analyzeUserWithdrawalBalance(row, requestTotals) {
   const walletPending = safeNum(row?.pendingBalance)
   const walletAvailable = safeNum(row?.currentBalance)
 
-  // Har user: earn − withdrawn (minus allowed) → sab jod = Earn − Withdrawn total ($1318…)
-  const expectedAvailable = toFixed2(dashboardEarn - walletWithdrawn)
+  const pendingHold = resolvePendingHold(walletPending, pendingFromRequests)
 
-  const expectedFromRequests = Math.max(
-    0,
-    toFixed2(dashboardEarn - approvedFromRequests),
+  // Earn − paid WD − pending WD hold → available currentBalance
+  const expectedAvailable = toFixed2(dashboardEarn - walletWithdrawn - pendingHold)
+
+  const expectedFromRequests = toFixed2(
+    dashboardEarn - approvedFromRequests - pendingFromRequests,
   )
 
   const totalBal = toFixed2(walletAvailable + walletPending)
@@ -78,6 +89,7 @@ export function analyzeUserWithdrawalBalance(row, requestTotals) {
     approvedFromRequests,
     pendingWd: pendingFromRequests,
     pendingFromRequests,
+    pendingHold,
     approvedCount: requestTotals?.approvedCount ?? 0,
     pendingCount: requestTotals?.pendingCount ?? 0,
     requestCount: requestTotals?.requestCount ?? 0,
@@ -108,6 +120,7 @@ export function computeWithdrawalAnalysis(overviewRows, withdrawalRequests) {
   let totalDashboardEarn = 0
   let totalApprovedFromRequests = 0
   let totalPendingFromRequests = 0
+  let totalPendingHold = 0
   let totalExpectedAvailable = 0
   let totalWalletAvailable = 0
   let totalWalletWithdrawn = 0
@@ -130,8 +143,8 @@ export function computeWithdrawalAnalysis(overviewRows, withdrawalRequests) {
     totalDashboardEarn += analysis.dashboardEarn
     totalApprovedFromRequests += analysis.approvedFromRequests
     totalPendingFromRequests += analysis.pendingFromRequests
+    totalPendingHold += analysis.pendingHold
     totalExpectedAvailable += analysis.expectedAvailable
-    // wallet-based expected (sync target)
     totalWalletAvailable += analysis.walletAvailable
     totalWalletWithdrawn += analysis.walletWithdrawn
     totalWalletPending += analysis.walletPending
@@ -140,7 +153,10 @@ export function computeWithdrawalAnalysis(overviewRows, withdrawalRequests) {
     if (Math.abs(analysis.withdrawnVsApproved) > MATCH_TOLERANCE) withdrawnMismatchCount += 1
   }
 
-  const formulaBalance = toFixed2(totalDashboardEarn - totalWalletWithdrawn)
+  // Earn − Withdrawn − Pending → SET currentBalance total
+  const formulaBalance = toFixed2(
+    totalDashboardEarn - totalWalletWithdrawn - totalPendingHold,
+  )
   const setTotalCurrent = toFixed2(totalExpectedAvailable)
   const diffAvailable = toFixed2(totalWalletAvailable - setTotalCurrent)
   const formulaVsSetDiff = toFixed2(setTotalCurrent - formulaBalance)
@@ -161,6 +177,7 @@ export function computeWithdrawalAnalysis(overviewRows, withdrawalRequests) {
       totalApprovedFromRequests: toFixed2(totalApprovedFromRequests),
       totalPendingWd: toFixed2(totalPendingFromRequests),
       totalPendingFromRequests: toFixed2(totalPendingFromRequests),
+      totalPendingHold: toFixed2(totalPendingHold),
       totalWalletWithdrawn: toFixed2(totalWalletWithdrawn),
       totalWalletPending: toFixed2(totalWalletPending),
       formulaBalance,

@@ -4,7 +4,8 @@ import { safeNum, toFixed2 } from './tshortnerSchema.js'
 const CHUNK_SIZE = 50
 
 /**
- * SET (+= nahi): currentBalance = Dashboard Earn − totalWithdrawn
+ * SET (+= nahi): currentBalance = Earn − totalWithdrawn − pendingHold
+ * Example: 2000 − 1700 − 200 = 100 (pending balance me nahi jodte).
  * Purana currentBalance replace — plus/jod nahi.
  * @param {import('firebase/database').Database} db
  * @param {Array<{ emailKey: string, expectedAvailable?: number, remainingEarn?: number }>} analysisUsers
