@@ -1,12 +1,12 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ref, update } from 'firebase/database'
+import { ref, get, update } from 'firebase/database'
 import { useFirebaseDb } from '../context/FirebaseProvider.jsx'
 import { useUsersData } from '../context/usersDataContext.js'
 import { dashboardSummary } from '../lib/dashboardActivity.js'
 import { formatInt, formatUsd } from '../lib/formatMoney.js'
 import { buildSmartRepairPaths } from '../lib/smartDashboardRepair.js'
-import { readDailyMap, safeNum } from '../lib/tshortnerSchema.js'
+import { readDailyMap, safeNum, toFixed2 } from '../lib/tshortnerSchema.js'
 import {
   formatAccountDetails,
   parseWithdrawalRequests,
@@ -123,12 +123,15 @@ export default function MailDashboard() {
   const [detailError, setDetailError] = useState('')
   const [fixBusy, setFixBusy] = useState(false)
   const [fixMsg, setFixMsg] = useState('')
+  const [wdBusyKey, setWdBusyKey] = useState(null)
+  const [wdMsg, setWdMsg] = useState('')
   const deferredSearch = useDeferredValue(search)
 
   const isStreaming = streamProgress?.streaming === true
 
   useEffect(() => {
     setFixMsg('')
+    setWdMsg('')
   }, [selectedKey])
 
   // Cache me full usersVal nahi hota — mail select par Firebase se poora node lao
@@ -270,6 +273,104 @@ export default function MailDashboard() {
       setFixBusy(false)
     }
   }, [db, selectedKey, rawUser, refreshUser])
+
+  /** Withdrawal status: pending approve/reject + Approved ↔ Rejected (wallet adjust). */
+  const changeWithdrawalStatus = useCallback(
+    async (w, action) => {
+      if (!db || !selectedKey || !w?.requestKey) return
+
+      const current = withdrawalStatusBucket(w.status)
+      const target = action === 'approve' ? 'approved' : 'rejected'
+      if (current === target) {
+        setWdMsg('⚠ Status pehle se hi yeh hai')
+        return
+      }
+
+      const amount = safeNum(w.amount)
+      if (amount <= 0) {
+        setWdMsg('❌ Invalid amount')
+        return
+      }
+
+      if (current !== 'pending') {
+        const ok = window.confirm(
+          current === 'approved' && target === 'rejected'
+            ? `Approved → Rejected?\n\n${formatUsd(amount)}\n\nAmount wallet me wapas + totalWithdrawn se hatega.`
+            : `Rejected → Approved?\n\n${formatUsd(amount)}\n\nWallet se amount kate + totalWithdrawn badhega.`,
+        )
+        if (!ok) return
+      }
+
+      const opKey = String(w.requestKey)
+      setWdBusyKey(opKey)
+      setWdMsg(action === 'approve' ? '⏳ Approving…' : '⏳ Rejecting…')
+
+      try {
+        const walletRef = ref(db, `users/${selectedKey}/wallet`)
+        const walletSnap = await get(walletRef)
+        if (!walletSnap.exists()) throw new Error('Wallet not found')
+
+        const wal = walletSnap.val() || {}
+        const reqRef = ref(
+          db,
+          `users/${selectedKey}/wallet/withdrawalRequests/${w.requestKey}`,
+        )
+        const now = Date.now()
+
+        if (current === 'pending') {
+          const pendingBal = safeNum(wal.pendingBalance)
+          if (pendingBal + 0.001 < amount) {
+            throw new Error(
+              `Pending balance ($${pendingBal.toFixed(2)}) amount ($${amount.toFixed(2)}) se kam hai`,
+            )
+          }
+          if (action === 'approve') {
+            await update(walletRef, {
+              pendingBalance: Math.max(0, toFixed2(pendingBal - amount)),
+              totalWithdrawn: toFixed2(safeNum(wal.totalWithdrawn) + amount),
+            })
+            await update(reqRef, { status: 'paid', processedAt: now })
+            setWdMsg(`✅ Approved · ${formatUsd(amount)}`)
+          } else {
+            await update(walletRef, {
+              currentBalance: toFixed2(safeNum(wal.currentBalance) + amount),
+              pendingBalance: Math.max(0, toFixed2(pendingBal - amount)),
+            })
+            await update(reqRef, { status: 'rejected', processedAt: now })
+            setWdMsg(`✅ Rejected · ${formatUsd(amount)} wallet me wapas`)
+          }
+        } else if (current === 'approved' && target === 'rejected') {
+          await update(walletRef, {
+            currentBalance: toFixed2(safeNum(wal.currentBalance) + amount),
+            totalWithdrawn: Math.max(0, toFixed2(safeNum(wal.totalWithdrawn) - amount)),
+          })
+          await update(reqRef, { status: 'rejected', processedAt: now })
+          setWdMsg(`✅ Status → Rejected · ${formatUsd(amount)} wallet me wapas`)
+        } else if (current === 'rejected' && target === 'approved') {
+          const currentBal = safeNum(wal.currentBalance)
+          if (currentBal + 0.001 < amount) {
+            throw new Error(
+              `Current balance ($${currentBal.toFixed(2)}) amount ($${amount.toFixed(2)}) se kam hai`,
+            )
+          }
+          await update(walletRef, {
+            currentBalance: Math.max(0, toFixed2(currentBal - amount)),
+            totalWithdrawn: toFixed2(safeNum(wal.totalWithdrawn) + amount),
+          })
+          await update(reqRef, { status: 'paid', processedAt: now })
+          setWdMsg(`✅ Status → Approved · ${formatUsd(amount)}`)
+        }
+
+        await refreshUser(selectedKey)
+      } catch (e) {
+        console.error(e)
+        setWdMsg('❌ ' + (e instanceof Error ? e.message : String(e)))
+      } finally {
+        setWdBusyKey(null)
+      }
+    },
+    [db, selectedKey, refreshUser],
+  )
 
   return (
     <div className="mail-dash">
@@ -497,6 +598,11 @@ export default function MailDashboard() {
                 Withdrawals
                 <span>{formatInt(withdrawals.length)}</span>
               </h3>
+              {wdMsg ? (
+                <p className="mail-dash__wd-msg" role="status">
+                  {wdMsg}
+                </p>
+              ) : null}
               {withdrawals.length === 0 ? (
                 <p className="mail-dash__panel-empty">
                   {detailLoading
@@ -513,24 +619,71 @@ export default function MailDashboard() {
                         <th>Method</th>
                         <th>Account</th>
                         <th>Status</th>
+                        <th>Change</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {withdrawals.map((w) => (
-                        <tr key={w.requestKey}>
-                          <td>{formatTs(w.createdAt)}</td>
-                          <td>{formatUsd(w.amount)}</td>
-                          <td>{w.method || '—'}</td>
-                          <td className="mail-dash__account">
-                            <WithdrawalAccountCell w={w} />
-                          </td>
-                          <td>
-                            <span className={'mail-dash__status ' + statusClass(w.status)}>
-                              {withdrawalStatusLabel(w.status)}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                      {withdrawals.map((w) => {
+                        const bucket = withdrawalStatusBucket(w.status)
+                        const busy = wdBusyKey === String(w.requestKey)
+                        return (
+                          <tr key={w.requestKey}>
+                            <td>{formatTs(w.createdAt)}</td>
+                            <td>{formatUsd(w.amount)}</td>
+                            <td>{w.method || '—'}</td>
+                            <td className="mail-dash__account">
+                              <WithdrawalAccountCell w={w} />
+                            </td>
+                            <td>
+                              <span className={'mail-dash__status ' + statusClass(w.status)}>
+                                {withdrawalStatusLabel(w.status)}
+                              </span>
+                            </td>
+                            <td>
+                              {bucket === 'pending' ? (
+                                <div className="mail-dash__wd-actions">
+                                  <button
+                                    type="button"
+                                    className="mail-dash__wd-btn ok"
+                                    disabled={busy || !db}
+                                    onClick={() => void changeWithdrawalStatus(w, 'approve')}
+                                  >
+                                    {busy ? '…' : 'Approve'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="mail-dash__wd-btn bad"
+                                    disabled={busy || !db}
+                                    onClick={() => void changeWithdrawalStatus(w, 'reject')}
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                              ) : (
+                                <select
+                                  className="mail-dash__wd-select"
+                                  value={bucket}
+                                  disabled={busy || !db}
+                                  aria-label="Change withdrawal status"
+                                  onChange={(e) => {
+                                    const next = e.target.value
+                                    e.target.value = bucket
+                                    if (next === bucket) return
+                                    if (next === 'approved') {
+                                      void changeWithdrawalStatus(w, 'approve')
+                                    } else if (next === 'rejected') {
+                                      void changeWithdrawalStatus(w, 'reject')
+                                    }
+                                  }}
+                                >
+                                  <option value="approved">Approved</option>
+                                  <option value="rejected">Rejected</option>
+                                </select>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>

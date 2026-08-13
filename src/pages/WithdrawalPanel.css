@@ -446,6 +446,54 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
+}
+
+.wd-actions--history {
+  gap: 6px;
+}
+
+.wd-status-change {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.wd-status-change__label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.wd-status-select {
+  min-width: 120px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.95);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.wd-status-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.wd-status-select:focus {
+  outline: 2px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 1px;
+}
+
+.wd-status-busy {
+  font-size: 12px;
+  color: #94a3b8;
 }
 
 .wd-root button {

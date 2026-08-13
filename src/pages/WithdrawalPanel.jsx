@@ -287,11 +287,107 @@ export default function WithdrawalPanel() {
     [db, refreshUser],
   )
 
+  /** History me Approved ↔ Rejected change — wallet bhi sahi adjust. */
+  const changeHistoryStatus = useCallback(
+    async (row, action) => {
+      if (!db || !row?.emailKey || !row?.requestKey) return
+
+      const current = withdrawalStatusBucket(row.status)
+      const target = action === 'approve' ? 'approved' : 'rejected'
+
+      if (current === 'pending') {
+        await processRequest(row, action)
+        return
+      }
+
+      if (current === target) {
+        setMsg({ text: '⚠ Status pehle se hi yeh hai', kind: 'err' })
+        return
+      }
+
+      const amount = safeNum(row.amount)
+      if (amount <= 0) {
+        setMsg({ text: '❌ Invalid amount', kind: 'err' })
+        return
+      }
+
+      const ok = window.confirm(
+        current === 'approved' && target === 'rejected'
+          ? `Approved → Rejected?\n\n${row.email}\n${formatUsd(amount)}\n\nAmount wallet me wapas + totalWithdrawn se hatega.`
+          : `Rejected → Approved?\n\n${row.email}\n${formatUsd(amount)}\n\nWallet se amount kate + totalWithdrawn badhega.`,
+      )
+      if (!ok) return
+
+      const opKey = `${row.emailKey}:${row.requestKey}`
+      setBusyKey(opKey)
+      setMsg({ text: '⏳ Status change…', kind: 'neutral' })
+
+      try {
+        const walletRef = ref(db, `users/${row.emailKey}/wallet`)
+        const walletSnap = await get(walletRef)
+        if (!walletSnap.exists()) throw new Error('Wallet not found')
+
+        const wallet = walletSnap.val() || {}
+        const reqRef = ref(
+          db,
+          `users/${row.emailKey}/wallet/withdrawalRequests/${row.requestKey}`,
+        )
+        const now = Date.now()
+
+        if (current === 'approved' && target === 'rejected') {
+          await update(walletRef, {
+            currentBalance: toFixed2(safeNum(wallet.currentBalance) + amount),
+            totalWithdrawn: Math.max(0, toFixed2(safeNum(wallet.totalWithdrawn) - amount)),
+          })
+          await update(reqRef, {
+            status: 'rejected',
+            processedAt: now,
+          })
+          setMsg({
+            text: `✅ Status → Rejected — ${row.email} · ${formatUsd(amount)} wallet me wapas`,
+            kind: 'ok',
+          })
+        } else if (current === 'rejected' && target === 'approved') {
+          const currentBal = safeNum(wallet.currentBalance)
+          if (currentBal + 0.001 < amount) {
+            throw new Error(
+              `Current balance ($${currentBal.toFixed(2)}) amount ($${amount.toFixed(2)}) se kam hai`,
+            )
+          }
+          await update(walletRef, {
+            currentBalance: Math.max(0, toFixed2(currentBal - amount)),
+            totalWithdrawn: toFixed2(safeNum(wallet.totalWithdrawn) + amount),
+          })
+          await update(reqRef, {
+            status: 'paid',
+            processedAt: now,
+          })
+          setMsg({
+            text: `✅ Status → Approved — ${row.email} · ${formatUsd(amount)}`,
+            kind: 'ok',
+          })
+        }
+
+        await refreshUser(row.emailKey)
+      } catch (e) {
+        console.error(e)
+        setMsg({
+          text: '❌ ' + (e instanceof Error ? e.message : String(e)),
+          kind: 'err',
+        })
+      } finally {
+        setBusyKey(null)
+      }
+    },
+    [db, refreshUser, processRequest],
+  )
+
   function statusBadgeClass(status) {
     return `wd-badge ${withdrawalStatusBucket(status)}`
   }
 
-  function renderRow(row, showActions) {
+  /** @param {'pending' | 'history'} mode */
+  function renderRow(row, mode) {
     const opKey = `${row.emailKey}:${row.requestKey}`
     const busy = busyKey === opKey
     const bucket = withdrawalStatusBucket(row.status)
@@ -316,7 +412,7 @@ export default function WithdrawalPanel() {
             </div>
           ) : null}
         </td>
-        {showActions ? (
+        {mode === 'pending' ? (
           <td>
             <div className="wd-actions">
               <button
@@ -336,7 +432,32 @@ export default function WithdrawalPanel() {
               </button>
             </div>
           </td>
-        ) : null}
+        ) : (
+          <td>
+            <div className="wd-actions wd-actions--history">
+              <label className="wd-status-change">
+                <span className="wd-status-change__label">Change</span>
+                <select
+                  className="wd-status-select"
+                  value={bucket}
+                  disabled={busy}
+                  aria-label={`Change status for ${row.email}`}
+                  onChange={(e) => {
+                    const next = e.target.value
+                    e.target.value = bucket
+                    if (next === bucket) return
+                    if (next === 'approved') void changeHistoryStatus(row, 'approve')
+                    else if (next === 'rejected') void changeHistoryStatus(row, 'reject')
+                  }}
+                >
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </label>
+              {busy ? <span className="wd-status-busy">…</span> : null}
+            </div>
+          </td>
+        )}
       </tr>
     )
   }
@@ -782,7 +903,7 @@ export default function WithdrawalPanel() {
                     </td>
                   </tr>
                 ) : (
-                  pendingRows.map((row) => renderRow(row, true))
+                  pendingRows.map((row) => renderRow(row, 'pending'))
                 )}
               </tbody>
             </table>
@@ -792,7 +913,7 @@ export default function WithdrawalPanel() {
         <section className="wd-section">
           <div className="wd-section-head">
             <h2>History</h2>
-            <span>Approved + Rejected — पुरानी सभी requests</span>
+            <span>Approved + Rejected — status Change se Approved ↔ Rejected</span>
           </div>
           <div className="wd-toolbar" style={{ borderTop: 'none' }}>
             <div className="wd-filter-tabs" role="tablist" aria-label="History filter">
@@ -824,24 +945,25 @@ export default function WithdrawalPanel() {
                   <th>Method</th>
                   <th>Account / Bank</th>
                   <th>Status</th>
+                  <th>Change status</th>
                 </tr>
               </thead>
               <tbody>
                 {isStreaming && historyRows.length > 0 ? (
                   <tr className="wd-stream-row">
-                    <td colSpan={6}>⟳ History भी load हो रही है…</td>
+                    <td colSpan={7}>⟳ History भी load हो रही है…</td>
                   </tr>
                 ) : null}
                 {!liveReady && !historyRows.length ? (
                   <tr className="empty">
-                    <td colSpan={6}>⏳ Loading history…</td>
+                    <td colSpan={7}>⏳ Loading history…</td>
                   </tr>
                 ) : !historyRows.length ? (
                   <tr className="empty">
-                    <td colSpan={6}>इस filter में कोई history नहीं।</td>
+                    <td colSpan={7}>इस filter में कोई history नहीं।</td>
                   </tr>
                 ) : (
-                  historyRows.map((row) => renderRow(row, false))
+                  historyRows.map((row) => renderRow(row, 'history'))
                 )}
               </tbody>
             </table>

@@ -503,6 +503,65 @@
   background: rgba(127, 29, 29, 0.35);
 }
 
+.mail-dash__wd-msg {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.mail-dash__wd-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mail-dash__wd-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.mail-dash__wd-btn.ok {
+  background: linear-gradient(90deg, #0ea5e9, #22c55e);
+  color: #022c22;
+}
+
+.mail-dash__wd-btn.bad {
+  background: linear-gradient(90deg, #f97316, #ef4444);
+  color: #111827;
+}
+
+.mail-dash__wd-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.mail-dash__wd-select {
+  min-width: 110px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.95);
+  color: #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.mail-dash__wd-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .mail-dash__links {
   list-style: none;
   margin: 0;
