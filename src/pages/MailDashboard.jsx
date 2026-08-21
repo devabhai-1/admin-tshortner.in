@@ -8,6 +8,7 @@ import { formatInt, formatUsd } from '../lib/formatMoney.js'
 import { buildSmartRepairPaths } from '../lib/smartDashboardRepair.js'
 import { readDailyMap, safeNum, toFixed2 } from '../lib/tshortnerSchema.js'
 import {
+  buildPendingWithdrawalWalletPatch,
   formatAccountDetails,
   parseWithdrawalRequests,
   withdrawalStatusBucket,
@@ -320,24 +321,32 @@ export default function MailDashboard() {
         if (current === 'pending') {
           const pendingBal = safeNum(wal.pendingBalance)
           if (pendingBal + 0.001 < amount) {
-            throw new Error(
-              `Pending balance ($${pendingBal.toFixed(2)}) amount ($${amount.toFixed(2)}) se kam hai`,
+            const okSync = window.confirm(
+              `⚠ PendingBalance sync galat ($${pendingBal.toFixed(2)}), request valid: $${amount.toFixed(2)}\n\n` +
+                `Current: $${safeNum(wal.currentBalance).toFixed(2)}\n\n` +
+                (action === 'approve'
+                  ? `Force Approve — Paid + totalWithdrawn.\nContinue?`
+                  : `Reject — amount wapas.\nContinue?`),
             )
+            if (!okSync) {
+              setWdMsg('⚠ Cancelled')
+              return
+            }
           }
+
+          const { patch, note } = buildPendingWithdrawalWalletPatch(wal, amount, action)
+          await update(walletRef, patch)
           if (action === 'approve') {
-            await update(walletRef, {
-              pendingBalance: Math.max(0, toFixed2(pendingBal - amount)),
-              totalWithdrawn: toFixed2(safeNum(wal.totalWithdrawn) + amount),
-            })
             await update(reqRef, { status: 'paid', processedAt: now })
-            setWdMsg(`✅ Approved · ${formatUsd(amount)}`)
+            setWdMsg(
+              `✅ Approved · ${formatUsd(amount)}` + (note ? ` (${note})` : ''),
+            )
           } else {
-            await update(walletRef, {
-              currentBalance: toFixed2(safeNum(wal.currentBalance) + amount),
-              pendingBalance: Math.max(0, toFixed2(pendingBal - amount)),
-            })
             await update(reqRef, { status: 'rejected', processedAt: now })
-            setWdMsg(`✅ Rejected · ${formatUsd(amount)} wallet me wapas`)
+            setWdMsg(
+              `✅ Rejected · ${formatUsd(amount)}` +
+                (note ? ` (${note})` : ' wallet me wapas'),
+            )
           }
         } else if (current === 'approved' && target === 'rejected') {
           await update(walletRef, {

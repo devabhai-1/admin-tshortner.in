@@ -1,5 +1,75 @@
-import { safeNum } from './tshortnerSchema.js'
+import { safeNum, toFixed2 } from './tshortnerSchema.js'
 export { formatUsd } from './formatMoney.js'
+
+/**
+ * Pending request approve/reject — pendingBalance out-of-sync (often $0) bhi handle.
+ * Admin approve kabhi balance check pe block nahi hota (request = user ne paisa hold kiya).
+ *
+ * @param {{ currentBalance?: unknown, pendingBalance?: unknown, totalWithdrawn?: unknown }} wallet
+ * @param {number} amount
+ * @param {'approve'|'reject'} action
+ * @returns {{
+ *   patch: { currentBalance?: number, pendingBalance: number, totalWithdrawn?: number },
+ *   fromPending: number,
+ *   fromCurrent: number,
+ *   shortfall: number,
+ *   note: string,
+ * }}
+ */
+export function buildPendingWithdrawalWalletPatch(wallet, amount, action) {
+  const amt = safeNum(amount)
+  const pendingBal = safeNum(wallet?.pendingBalance)
+  const currentBal = safeNum(wallet?.currentBalance)
+  const withdrawn = safeNum(wallet?.totalWithdrawn)
+
+  const fromPending = Math.min(pendingBal, amt)
+  const shortfall = toFixed2(Math.max(0, amt - fromPending))
+  const nextPending = Math.max(0, toFixed2(pendingBal - fromPending))
+
+  if (action === 'approve') {
+    // Shortfall pending me nahi → current se jitna mil sake kata; baaki force approve
+    const fromCurrent = toFixed2(Math.min(Math.max(0, currentBal), shortfall))
+    /** @type {{ currentBalance?: number, pendingBalance: number, totalWithdrawn: number }} */
+    const patch = {
+      pendingBalance: nextPending,
+      totalWithdrawn: toFixed2(withdrawn + amt),
+    }
+    if (fromCurrent > 0.001) {
+      patch.currentBalance = Math.max(0, toFixed2(currentBal - fromCurrent))
+    }
+    const forced = shortfall > fromCurrent + 0.001
+    return {
+      patch,
+      fromPending: toFixed2(fromPending),
+      fromCurrent,
+      shortfall,
+      note: forced
+        ? `force approve (pending $${pendingBal.toFixed(2)} / current se $${fromCurrent.toFixed(2)})`
+        : shortfall > 0.001
+          ? `pending $${fromPending.toFixed(2)} + current $${fromCurrent.toFixed(2)}`
+          : '',
+    }
+  }
+
+  // reject: pending me jo hold tha wapas; agar pending 0 thi to pura amount current me
+  // (warna user ka paisa stuck / sync wipe ho chuka)
+  const creditBack = shortfall > 0.001 && fromPending < 0.001 ? amt : toFixed2(fromPending)
+  return {
+    patch: {
+      currentBalance: toFixed2(currentBal + creditBack),
+      pendingBalance: nextPending,
+    },
+    fromPending: toFixed2(fromPending),
+    fromCurrent: 0,
+    shortfall,
+    note:
+      shortfall > 0.001 && fromPending < 0.001
+        ? `pending $0 thi — $${amt.toFixed(2)} current me restore`
+        : shortfall > 0.001
+          ? `pending se $${fromPending.toFixed(2)} wapas`
+          : '',
+  }
+}
 
 /** @typedef {'pending'|'approved'|'rejected'} WithdrawalBucket */
 

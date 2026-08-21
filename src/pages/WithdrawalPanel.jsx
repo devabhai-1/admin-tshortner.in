@@ -8,6 +8,7 @@ import { formatInt, formatUsd } from '../lib/formatMoney.js'
 import { safeNum, toFixed2 } from '../lib/tshortnerSchema.js'
 import { computeWithdrawalAnalysis } from '../lib/withdrawalAnalysis.js'
 import {
+  buildPendingWithdrawalWalletPatch,
   formatAccountDetails,
   formatWithdrawalDate,
   parseWithdrawalRequests,
@@ -238,38 +239,46 @@ export default function WithdrawalPanel() {
         const wallet = walletSnap.val() || {}
         const pendingBal = safeNum(wallet.pendingBalance)
         if (pendingBal + 0.001 < amount) {
-          throw new Error(
-            `Pending balance ($${pendingBal.toFixed(2)}) request amount ($${amount.toFixed(2)}) se kam hai`,
+          const okSync = window.confirm(
+            `⚠ Is user ka pendingBalance sync galat hai ($${pendingBal.toFixed(2)}), ` +
+              `lekin request valid hai: $${amount.toFixed(2)}\n\n` +
+              `${row.email}\n` +
+              `Current: $${safeNum(wallet.currentBalance).toFixed(2)}\n\n` +
+              (action === 'approve'
+                ? `Approve force hoga — status Paid + totalWithdrawn badhega.\nContinue?`
+                : `Reject — amount wallet me wapas.\nContinue?`),
           )
+          if (!okSync) {
+            setMsg({ text: '⚠ Cancelled', kind: 'err' })
+            return
+          }
         }
 
+        const { patch, note } = buildPendingWithdrawalWalletPatch(wallet, amount, action)
         const reqRef = ref(db, `users/${row.emailKey}/wallet/withdrawalRequests/${row.requestKey}`)
         const now = Date.now()
 
+        await update(walletRef, patch)
         if (action === 'approve') {
-          await update(walletRef, {
-            pendingBalance: Math.max(0, toFixed2(pendingBal - amount)),
-            totalWithdrawn: toFixed2(safeNum(wallet.totalWithdrawn) + amount),
-          })
           await update(reqRef, {
             status: 'paid',
             processedAt: now,
           })
           setMsg({
-            text: `✅ Approved — ${row.email} · ${formatUsd(amount)}`,
+            text:
+              `✅ Approved — ${row.email} · ${formatUsd(amount)}` +
+              (note ? ` (${note})` : ''),
             kind: 'ok',
           })
         } else {
-          await update(walletRef, {
-            currentBalance: toFixed2(safeNum(wallet.currentBalance) + amount),
-            pendingBalance: Math.max(0, toFixed2(pendingBal - amount)),
-          })
           await update(reqRef, {
             status: 'rejected',
             processedAt: now,
           })
           setMsg({
-            text: `✅ Rejected — ${row.email} · ${formatUsd(amount)} wallet me wapas`,
+            text:
+              `✅ Rejected — ${row.email} · ${formatUsd(amount)}` +
+              (note ? ` (${note})` : ' wallet me wapas'),
             kind: 'ok',
           })
         }
