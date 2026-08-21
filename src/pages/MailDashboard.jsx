@@ -212,25 +212,40 @@ export default function MailDashboard() {
 
   const walletCheck = useMemo(() => {
     const earn = safeNum(dashSum.totalEarnings)
-    const withdrawn = safeNum(
+    const withdrawnStored = safeNum(
       wallet.totalWithdrawn != null ? wallet.totalWithdrawn : selectedRow?.totalWithdrawn,
     )
+    let approvedSum = 0
+    let approvedCount = 0
+    for (const r of parseWithdrawalRequests(wallet.withdrawalRequests)) {
+      if (withdrawalStatusBucket(r.status) === 'approved') {
+        approvedSum += safeNum(r.amount)
+        approvedCount += 1
+      }
+    }
+    approvedSum = toFixed2(approvedSum)
+    const withdrawnMismatch =
+      approvedCount > 0 && Math.abs(withdrawnStored - approvedSum) > 0.02
+    const withdrawn = withdrawnMismatch ? approvedSum : withdrawnStored
     const pending = safeNum(
       wallet.pendingBalance != null ? wallet.pendingBalance : selectedRow?.pendingBalance,
     )
     const current = safeNum(
       wallet.currentBalance != null ? wallet.currentBalance : selectedRow?.currentBalance,
     )
-    const expected = earn - withdrawn - pending
-    const diff = current - expected
+    const expected = toFixed2(earn - withdrawn - pending)
+    const diff = toFixed2(current - expected)
     return {
       earn,
-      withdrawn,
+      withdrawn: withdrawnStored,
+      approvedSum,
+      approvedCount,
+      withdrawnMismatch,
       pending,
       current,
       expected,
       diff,
-      matches: Math.abs(diff) <= 0.02,
+      matches: Math.abs(diff) <= 0.02 && !withdrawnMismatch,
     }
   }, [dashSum.totalEarnings, wallet, selectedRow])
 
@@ -266,7 +281,7 @@ export default function MailDashboard() {
       await update(ref(db), paths)
       await refreshUser(selectedKey)
       setFixMsg(
-        `✅ Fixed · earn ${formatUsd(eco.trueEarn)} · bal ${formatUsd(eco.expectedBalance)}`,
+        `✅ Fixed · earn ${formatUsd(eco.trueEarn)} · WD ${formatUsd(eco.withdrawn)} · bal ${formatUsd(eco.expectedBalance)}`,
       )
     } catch (e) {
       setFixMsg('❌ ' + (e instanceof Error ? e.message : String(e)))
@@ -549,8 +564,11 @@ export default function MailDashboard() {
               <span>Total withdrawn (paid)</span>
               <strong>{formatUsd(walletCheck.withdrawn)}</strong>
               <small>
-                {formatInt(selectedRow?.withdrawalApproved || 0)} paid ·{' '}
-                {formatInt(selectedRow?.withdrawalRejected || 0)} rejected
+                {formatInt(walletCheck.approvedCount || selectedRow?.withdrawalApproved || 0)} paid
+                · {formatInt(selectedRow?.withdrawalRejected || 0)} rejected
+                {walletCheck.withdrawnMismatch
+                  ? ` · ⚠ requests sum ${formatUsd(walletCheck.approvedSum)}`
+                  : ''}
               </small>
             </div>
           </div>
@@ -561,29 +579,34 @@ export default function MailDashboard() {
           >
             <strong>
               Earn {formatUsd(walletCheck.earn)} − WD {formatUsd(walletCheck.withdrawn)} − Pending{' '}
-              {formatUsd(walletCheck.pending)} = {formatUsd(walletCheck.expected)}
+              {formatUsd(walletCheck.pending)} ={' '}
+              {formatUsd(walletCheck.earn - walletCheck.withdrawn - walletCheck.pending)}
             </strong>
             <span>
               Wallet {formatUsd(walletCheck.current)}
               {walletCheck.matches
                 ? ' · ✓ Match — ye mail sahi hai'
-                : ` · ✗ Diff ${formatUsd(walletCheck.diff)}`}
+                : walletCheck.withdrawnMismatch
+                  ? ` · ✗ WD double-count — ${walletCheck.approvedCount} paid = ${formatUsd(walletCheck.approvedSum)}, ledger ${formatUsd(walletCheck.withdrawn)} · sahi bal ${formatUsd(walletCheck.expected)}`
+                  : ` · ✗ Diff ${formatUsd(walletCheck.diff)}`}
             </span>
             <em>
-              Note: “Total earnings $849” lifetime earn hai, wallet nahi. Withdrawable = leftover
-              after paid WD.
+              Note: “Total earnings” lifetime earn hai, wallet nahi. Withdrawable = leftover after
+              paid WD. Paid WD = approved requests ka sum.
             </em>
           </div>
 
-          {storedEarnMismatch || selectedRow?.needsRepair ? (
+          {storedEarnMismatch || selectedRow?.needsRepair || walletCheck.withdrawnMismatch ? (
             <div className="mail-dash__mismatch" role="status">
               <strong>⚠ Stale / mismatch — repair chahiye</strong>
               <span>
+                {walletCheck.withdrawnMismatch
+                  ? `totalWithdrawn ${formatUsd(walletCheck.withdrawn)} ≠ approved requests ${formatUsd(walletCheck.approvedSum)} (extra ${formatUsd(walletCheck.withdrawn - walletCheck.approvedSum)}). `
+                  : ''}
                 {storedEarnMismatch
                   ? `Daily sum = ${formatUsd(storedEarnMismatch.dailyEarn)} · stored Earn/Available = ${formatUsd(storedEarnMismatch.stored)}. `
                   : ''}
-                Wallet = Earn − Withdrawn − Pending. Is mail pe Fix dabao, ya Dashboard pe{' '}
-                <Link to="/">Smart Fix All</Link>.
+                Fix dabao → totalWithdrawn + balance sync.
               </span>
               <button
                 type="button"

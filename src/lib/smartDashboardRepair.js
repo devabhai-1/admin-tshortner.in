@@ -1,7 +1,7 @@
 import { ref, update } from 'firebase/database'
 import { dashboardSummary } from './dashboardActivity.js'
 import { buildDashboardTotals, readDailyMap, safeNum, toFixed2 } from './tshortnerSchema.js'
-import { dedupeWithdrawalRequests, parseWithdrawalRequests, withdrawalStatusBucket } from './withdrawals.js'
+import { parseWithdrawalRequests, withdrawalStatusBucket } from './withdrawals.js'
 
 const TOL = 0.02
 const CHUNK = 40
@@ -15,6 +15,17 @@ function pendingHoldFromWalletAndRequests(wallet) {
     }
   }
   return toFixed2(Math.max(walletPending, reqPending))
+}
+
+/** Approved/paid requests ka sum — wallet.totalWithdrawn ka source of truth. */
+function approvedWithdrawnFromRequests(wallet) {
+  let sum = 0
+  for (const r of parseWithdrawalRequests(wallet?.withdrawalRequests)) {
+    if (withdrawalStatusBucket(r.status) === 'approved') {
+      sum += safeNum(r.amount)
+    }
+  }
+  return toFixed2(sum)
 }
 
 /**
@@ -56,7 +67,13 @@ export function computeUserTrueEconomics(emailKey, rawUser) {
   const storedAvailable = toFixed2(
     safeNum(dashboard.totalavailable ?? dashboard.totalAvailable ?? dash.storedTotalAvailable),
   )
-  const withdrawn = toFixed2(wallet.totalWithdrawn)
+  const withdrawnStored = toFixed2(wallet.totalWithdrawn)
+  const withdrawnFromRequests = approvedWithdrawnFromRequests(wallet)
+  const hasApprovedRequests = withdrawnFromRequests > TOL
+  // Requests sum truth jab approved WDs maujood hon (double-count / stale fix)
+  const withdrawn = hasApprovedRequests ? withdrawnFromRequests : withdrawnStored
+  const withdrawnMismatch =
+    hasApprovedRequests && Math.abs(withdrawnStored - withdrawnFromRequests) > TOL
   const pendingHold = pendingHoldFromWalletAndRequests(wallet)
   const currentBalance = toFixed2(wallet.currentBalance)
   const expectedBalance = toFixed2(trueEarn - withdrawn - pendingHold)
@@ -65,7 +82,9 @@ export function computeUserTrueEconomics(emailKey, rawUser) {
     dash.fromDaily &&
     (Math.abs(storedEarn - trueEarn) > TOL || Math.abs(storedAvailable - trueEarn) > TOL)
   const balanceMismatch = Math.abs(currentBalance - expectedBalance) > TOL
-  const needsRepair = Boolean(dash.fromDaily && (earnMismatch || balanceMismatch))
+  const needsRepair = Boolean(
+    dash.fromDaily && (earnMismatch || balanceMismatch || withdrawnMismatch),
+  )
 
   return {
     emailKey,
@@ -76,6 +95,9 @@ export function computeUserTrueEconomics(emailKey, rawUser) {
     storedEarn,
     storedAvailable,
     withdrawn,
+    withdrawnStored,
+    withdrawnFromRequests,
+    withdrawnMismatch,
     pendingHold,
     currentBalance,
     expectedBalance,
@@ -106,6 +128,11 @@ export function buildSmartRepairPaths(emailKey, rawUser) {
     [`${base}/dailyEarning`]: totals.dailyEarning,
     [`${base}/dailyCPM`]: totals.dailyCPM,
     [`users/${emailKey}/wallet/currentBalance`]: eco.expectedBalance,
+  }
+
+  // Double-count fix: totalWithdrawn = approved requests sum
+  if (eco.withdrawnMismatch) {
+    paths[`users/${emailKey}/wallet/totalWithdrawn`] = eco.withdrawnFromRequests
   }
 
   return { paths, eco, skip: false }
