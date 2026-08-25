@@ -315,6 +315,77 @@
   color: #94a3b8;
 }
 
+.wd-rate-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 16px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.wd-rate-bar__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fbbf24;
+  letter-spacing: 0.02em;
+}
+
+.wd-rate-bar__hint {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.wd-rate-bar__input {
+  width: 110px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(15, 23, 42, 0.95);
+  color: #fef3c7;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.wd-rate-bar__input:focus {
+  outline: none;
+  border-color: rgba(251, 191, 36, 0.85);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.2);
+}
+
+.wd-rate-bar__preview {
+  margin-left: auto;
+  font-size: 11px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.wd-amount-cell {
+  white-space: nowrap;
+}
+
+.wd-amount-cell strong {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+
+.wd-amount-usd-label {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.wd-amount-inr {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fbbf24;
+  font-variant-numeric: tabular-nums;
+}
+
 .wd-table-wrap {
   overflow-x: auto;
 }

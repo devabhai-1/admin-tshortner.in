@@ -4,7 +4,7 @@ import { useFirebaseDb } from '../context/FirebaseProvider.jsx'
 import { useUsersData } from '../context/usersDataContext.js'
 import { usersDataSession } from '../context/usersDataSession.js'
 import { summarizeOverviewRows } from '../lib/buildUserOverviewRows.js'
-import { formatInt, formatUsd } from '../lib/formatMoney.js'
+import { formatInt, formatInr, formatUsd, usdToInr } from '../lib/formatMoney.js'
 import { safeNum, toFixed2 } from '../lib/tshortnerSchema.js'
 import { computeWithdrawalAnalysis } from '../lib/withdrawalAnalysis.js'
 import {
@@ -18,6 +18,20 @@ import {
 } from '../lib/withdrawals.js'
 import './WithdrawalPanel.css'
 import AdminSectionNav from '../components/AdminSectionNav.jsx'
+
+const INR_RATE_STORAGE_KEY = 'tshortner.admin.usdInrRate'
+const DEFAULT_INR_RATE = 83
+
+function readStoredInrRate() {
+  try {
+    const raw = localStorage.getItem(INR_RATE_STORAGE_KEY)
+    const n = Number(raw)
+    if (Number.isFinite(n) && n > 0) return n
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_INR_RATE
+}
 
 function isBankWithdrawal(row) {
   const m = String(row?.method || '').toLowerCase()
@@ -93,6 +107,7 @@ export default function WithdrawalPanel() {
   const liveReady = ready
   const [search, setSearch] = useState('')
   const [historyFilter, setHistoryFilter] = useState('all')
+  const [inrRate, setInrRate] = useState(readStoredInrRate)
   const [busyKey, setBusyKey] = useState(null)
   const [msg, setMsg] = useState({ text: '', kind: 'neutral' })
   const [analysisLoading, setAnalysisLoading] = useState(false)
@@ -395,19 +410,40 @@ export default function WithdrawalPanel() {
     return `wd-badge ${withdrawalStatusBucket(status)}`
   }
 
+  function setInrRateAndPersist(next) {
+    const n = Number(next)
+    setInrRate(Number.isFinite(n) && n > 0 ? n : '')
+    if (Number.isFinite(n) && n > 0) {
+      try {
+        localStorage.setItem(INR_RATE_STORAGE_KEY, String(n))
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const effectiveInrRate =
+    Number.isFinite(Number(inrRate)) && Number(inrRate) > 0
+      ? Number(inrRate)
+      : DEFAULT_INR_RATE
+
   /** @param {'pending' | 'history'} mode */
   function renderRow(row, mode) {
     const opKey = `${row.emailKey}:${row.requestKey}`
     const busy = busyKey === opKey
     const bucket = withdrawalStatusBucket(row.status)
+    const inrAmount = usdToInr(row.amount, effectiveInrRate)
 
     return (
       <tr key={opKey}>
         <td>{formatWithdrawalDate(row.createdAt)}</td>
         <td className="email">{row.email}</td>
-        <td>
+        <td className="wd-amount-cell">
           <strong>{formatUsd(row.amount)}</strong>
-          <div style={{ fontSize: '10px', color: '#94a3b8' }}>{row.currency || 'USD'}</div>
+          <div className="wd-amount-usd-label">{row.currency || 'USD'}</div>
+          <div className="wd-amount-inr" title={`1 USD = ₹${effectiveInrRate}`}>
+            {formatInr(inrAmount)}
+          </div>
         </td>
         <td>{row.method || '—'}</td>
         <td className="wd-account-cell">
@@ -877,6 +913,28 @@ export default function WithdrawalPanel() {
                 : liveReady && sessionLoaded
                   ? `${pendingRows.length} waiting · ${requests.length} total reqs`
                   : 'Loading…'}
+            </span>
+          </div>
+          <div className="wd-rate-bar" aria-label="USD to INR rate">
+            <label className="wd-rate-bar__label" htmlFor="wd-inr-rate">
+              ₹ Rate
+            </label>
+            <span className="wd-rate-bar__hint">1 USD =</span>
+            <input
+              id="wd-inr-rate"
+              className="wd-rate-bar__input"
+              type="number"
+              min="1"
+              step="0.01"
+              inputMode="decimal"
+              value={inrRate}
+              onChange={(e) => setInrRateAndPersist(e.target.value)}
+              title="Rupee rate — USD amounts is rate se INR me convert"
+            />
+            <span className="wd-rate-bar__hint">INR</span>
+            <span className="wd-rate-bar__preview">
+              Example: $1 → {formatInr(effectiveInrRate)} · $23.80 →{' '}
+              {formatInr(usdToInr(23.8, effectiveInrRate))}
             </span>
           </div>
           <div className="wd-table-wrap">
