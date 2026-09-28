@@ -1053,6 +1053,179 @@ app.get('/api/analytics/demographics', async (req, res) => {
   }
 });
 
+const PAGE_METRICS = [
+  'screenPageViews',
+  'activeUsers',
+  'screenPageViewsPerUser',
+  'userEngagementDuration',
+  'eventCount',
+  'keyEvents',
+  'totalRevenue',
+];
+
+async function runPagesReport(startDate, endDate, { limit, offset, q, metrics }) {
+  const names = metrics || PAGE_METRICS;
+  const request = {
+    property: `properties/${PROPERTY_ID}`,
+    dimensions: [{ name: 'unifiedPagePathScreen' }],
+    metrics: names.map((name) => ({ name })),
+    dateRanges: [{ startDate, endDate }],
+    metricAggregations: ['TOTAL'],
+    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+    limit,
+    offset,
+  };
+  if (q) {
+    request.dimensionFilter = {
+      filter: {
+        fieldName: 'unifiedPagePathScreen',
+        stringFilter: { matchType: 'CONTAINS', value: q, caseSensitive: false },
+      },
+    };
+  }
+  try {
+    const [response] = await gaClient.runReport(request);
+    response._metricNames = names;
+    return response;
+  } catch (err) {
+    if (names.includes('keyEvents')) {
+      return runPagesReport(startDate, endDate, {
+        limit,
+        offset,
+        q,
+        metrics: names.filter((name) => name !== 'keyEvents'),
+      });
+    }
+    throw err;
+  }
+}
+
+app.get('/api/analytics/pages', async (req, res) => {
+  try {
+    if (!gaClient) {
+      return res.status(500).json({ error: 'GA4 client not initialized' });
+    }
+
+    const today = formatDate(new Date());
+    const startDate = String(req.query.start_date || today).slice(0, 10);
+    const endDate = String(req.query.end_date || startDate).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      return res.status(400).json({ error: 'start_date and end_date must be YYYY-MM-DD' });
+    }
+    if (startDate > endDate) {
+      return res.status(400).json({ error: 'start_date cannot be after end_date' });
+    }
+
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || '10', 10) || 10));
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+    const q = String(req.query.q || '').trim().slice(0, 120);
+
+    const report = await runPagesReport(startDate, endDate, { limit, offset, q });
+    const metricNames = report._metricNames || PAGE_METRICS;
+    const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+
+    const mapRow = (row) => {
+      const views = numMetric(row, idx.screenPageViews);
+      const activeUsers = numMetric(row, idx.activeUsers);
+      const duration = numMetric(row, idx.userEngagementDuration);
+      return {
+        path: row.dimensionValues?.[0]?.value || '(not set)',
+        views,
+        activeUsers,
+        viewsPerUser: numMetric(row, idx.screenPageViewsPerUser),
+        avgEngagementTime: activeUsers ? duration / activeUsers : 0,
+        eventCount: numMetric(row, idx.eventCount),
+        keyEvents: idx.keyEvents == null ? 0 : numMetric(row, idx.keyEvents),
+        totalRevenue: numMetric(row, idx.totalRevenue),
+      };
+    };
+
+    const rows = (report.rows || []).map(mapRow);
+    const totalsRow = report.totals?.[0];
+    const totals = totalsRow
+      ? mapRow({ ...totalsRow, dimensionValues: [{ value: 'Total' }] })
+      : {
+          path: 'Total',
+          views: 0,
+          activeUsers: 0,
+          viewsPerUser: 0,
+          avgEngagementTime: 0,
+          eventCount: 0,
+          keyEvents: 0,
+          totalRevenue: 0,
+        };
+    totals.path = 'Total';
+
+    const topPaths = offset === 0 ? rows.slice(0, 5).map((row) => row.path) : [];
+    const [dateRes] = await gaClient.runReport({
+      property: `properties/${PROPERTY_ID}`,
+      dimensions: [{ name: 'date' }],
+      metrics: [{ name: 'screenPageViews' }, { name: 'totalRevenue' }],
+      dateRanges: [{ startDate, endDate }],
+      orderBys: [{ dimension: { dimensionName: 'date' } }],
+      limit: 400,
+      dimensionFilter: q
+        ? {
+            filter: {
+              fieldName: 'unifiedPagePathScreen',
+              stringFilter: { matchType: 'CONTAINS', value: q, caseSensitive: false },
+            },
+          }
+        : undefined,
+    });
+
+    const seriesMap = new Map();
+    for (const row of dateRes.rows || []) {
+      const date = gaDateToIso(row.dimensionValues?.[0]?.value);
+      seriesMap.set(date, {
+        date,
+        Total: Number(row.metricValues?.[0]?.value || 0),
+        revenue: Number(row.metricValues?.[1]?.value || 0),
+      });
+    }
+
+    if (topPaths.length) {
+      const [pathRes] = await gaClient.runReport({
+        property: `properties/${PROPERTY_ID}`,
+        dimensions: [{ name: 'date' }, { name: 'unifiedPagePathScreen' }],
+        metrics: [{ name: 'screenPageViews' }],
+        dateRanges: [{ startDate, endDate }],
+        dimensionFilter: {
+          filter: {
+            fieldName: 'unifiedPagePathScreen',
+            inListFilter: { values: topPaths },
+          },
+        },
+        orderBys: [{ dimension: { dimensionName: 'date' } }],
+        limit: 10000,
+      });
+      for (const row of pathRes.rows || []) {
+        const date = gaDateToIso(row.dimensionValues?.[0]?.value);
+        const path = row.dimensionValues?.[1]?.value || '(not set)';
+        if (!seriesMap.has(date)) seriesMap.set(date, { date, Total: 0, revenue: 0 });
+        seriesMap.get(date)[path] = Number(row.metricValues?.[0]?.value || 0);
+      }
+    }
+
+    return res.json({
+      startDate,
+      endDate,
+      q,
+      limit,
+      offset,
+      rowCount: Number(report.rowCount || 0),
+      currency: 'INR',
+      totals,
+      rows,
+      series: Array.from(seriesMap.values()).sort((a, b) => a.date.localeCompare(b.date)),
+      seriesPaths: topPaths,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e.message || 'Pages report failed' });
+  }
+});
+
 function loadGaCredentials() {
   const gaEnv = process.env.GA4_SERVICE_ACCOUNT
   if (gaEnv) {

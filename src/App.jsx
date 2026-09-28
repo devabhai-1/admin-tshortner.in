@@ -6,6 +6,7 @@ import EarningUsersDashboard from './pages/EarningUsersDashboard.jsx'
 import TelegramIdsDashboard from './pages/TelegramIdsDashboard.jsx'
 import MailDashboard from './pages/MailDashboard.jsx'
 import DemographicDashboard from './pages/DemographicDashboard.jsx'
+import PagesDashboard from './pages/PagesDashboard.jsx'
 import RealtimeDashboard from './pages/RealtimeDashboard.jsx'
 import Login from './pages/Login.jsx'
 import { useAuth } from './context/AuthProvider.jsx'
@@ -30,6 +31,7 @@ function ProtectedApp() {
               </NavLink>
               <NavLink to="/ga4">GA4 Analysis</NavLink>
               <NavLink to="/demographics">Demographics</NavLink>
+              <NavLink to="/pages">Pages</NavLink>
               <NavLink to="/realtime">Realtime</NavLink>
               <NavLink to="/earning-users">All Users</NavLink>
               <NavLink to="/telegram-ids">Telegram IDs</NavLink>
@@ -53,6 +55,7 @@ function ProtectedApp() {
               <Route path="/" element={<MainDashboard />} />
               <Route path="/ga4" element={<GaFirebaseDashboard />} />
               <Route path="/demographics" element={<DemographicDashboard />} />
+              <Route path="/pages" element={<PagesDashboard />} />
               <Route path="/realtime" element={<RealtimeDashboard />} />
               <Route path="/earning-users" element={<EarningUsersDashboard />} />
               <Route path="/telegram-ids" element={<TelegramIdsDashboard />} />
