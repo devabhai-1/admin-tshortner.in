@@ -16,6 +16,7 @@ import {
   verifyAdminToken,
   extractToken,
 } from './auth.js';
+import { getCountryCpm } from './admanagerCpm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1051,6 +1052,38 @@ app.get('/api/analytics/demographics', async (req, res) => {
     return res.status(500).json({ error: e.message || 'Demographics report failed' });
   }
 });
+
+function loadGaCredentials() {
+  const gaEnv = process.env.GA4_SERVICE_ACCOUNT
+  if (gaEnv) {
+    const cred = JSON.parse(gaEnv)
+    if (cred.private_key) cred.private_key = cred.private_key.replace(/\\n/g, '\n')
+    return cred
+  }
+  if (fs.existsSync(GA_KEY_FILE)) {
+    return JSON.parse(fs.readFileSync(GA_KEY_FILE, 'utf8'))
+  }
+  return null
+}
+
+app.get('/api/admanager/country-cpm', async (req, res) => {
+  try {
+    const credentials = loadGaCredentials()
+    if (!credentials) {
+      return res.status(500).json({ error: 'Analytics service account missing' })
+    }
+    const payload = await getCountryCpm({
+      credentials,
+      db,
+      networkCode: process.env.AD_MANAGER_NETWORK_CODE || '23113214187',
+      force: req.query.refresh === '1',
+    })
+    return res.json(payload)
+  } catch (e) {
+    console.error(e)
+    return res.status(502).json({ error: e.message || 'Ad Manager CPM failed' })
+  }
+})
 
 app.get('/api/health', (req, res) => {
     res.json({

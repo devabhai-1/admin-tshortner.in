@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { limitToLast, onValue, query, ref } from 'firebase/database'
 import { useFirebaseDb } from '../context/FirebaseProvider.jsx'
 import AdminSectionNav from '../components/AdminSectionNav.jsx'
+import { apiFetch } from '../lib/api.js'
 import './RealtimeDashboard.css'
 
 function todayKey() {
@@ -15,6 +16,16 @@ function todayKey() {
 
 function fmtInt(n) {
   return new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(Number(n) || 0)
+}
+
+function fmtInr(n) {
+  if (n == null || Number.isNaN(Number(n))) return '—'
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(n) || 0)
 }
 
 function fmtTime(ms) {
@@ -61,7 +72,28 @@ function Bar({ value, total }) {
   )
 }
 
-function CountryBits({ rows }) {
+function countryEarn(hits, code, cpmByCode) {
+  const rate = cpmByCode?.[String(code || '').toUpperCase()]
+  if (!rate || rate.ecpm == null) return null
+  return ((Number(hits) || 0) * Number(rate.ecpm)) / 1000
+}
+
+function sumCountryEarn(rows, cpmByCode) {
+  let earning = 0
+  let knownClicks = 0
+  for (const row of rows) {
+    const part = countryEarn(row.hits, row.code, cpmByCode)
+    if (part == null) continue
+    earning += part
+    knownClicks += Number(row.hits) || 0
+  }
+  return {
+    earning,
+    cpm: knownClicks > 0 ? (earning / knownClicks) * 1000 : 0,
+  }
+}
+
+function CountryBits({ rows, cpmByCode }) {
   if (!rows.length) return '—'
   return (
     <ul className="rt-chips">
@@ -69,6 +101,7 @@ function CountryBits({ rows }) {
         <li key={country.code}>
           {country.name || country.country || country.code}
           <b>{fmtInt(country.hits)}</b>
+          {cpmByCode ? <small>{fmtInr(countryEarn(country.hits, country.code, cpmByCode))}</small> : null}
         </li>
       ))}
     </ul>
@@ -86,7 +119,11 @@ export default function RealtimeDashboard() {
   const [countriesAll, setCountriesAll] = useState([])
   const [links, setLinks] = useState([])
   const [events, setEvents] = useState([])
+  const [cpmPack, setCpmPack] = useState(null)
+  const [cpmError, setCpmError] = useState('')
+  const [cpmLoading, setCpmLoading] = useState(false)
   const live = day === todayKey()
+  const cpmByCode = cpmPack?.countries || null
 
   useEffect(() => {
     if (!db) return undefined
@@ -141,11 +178,38 @@ export default function RealtimeDashboard() {
   }, [events, selected])
 
   const mailHits = Number(selected?.hits) || 0
+
+  const loadCpm = (refresh = false) => {
+    setCpmLoading(true)
+    const path = refresh ? '/api/admanager/country-cpm?refresh=1' : '/api/admanager/country-cpm'
+    apiFetch(path)
+      .then(async (res) => {
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(body.error || 'CPM load nahi hua')
+        setCpmPack(body)
+        setCpmError(body.error || '')
+      })
+      .catch((err) => setCpmError(err.message || 'CPM load nahi hua'))
+      .finally(() => setCpmLoading(false))
+  }
+
+  useEffect(() => {
+    loadCpm(false)
+  }, [])
   const mailSearch = mailQuery.trim().toLowerCase()
   const filteredEmails = useMemo(() => {
     if (!mailSearch) return emails
     return emails.filter((row) => String(row.email || '').toLowerCase().includes(mailSearch))
   }, [emails, mailSearch])
+
+  const totalEarn = useMemo(
+    () => sumCountryEarn(countriesAll, cpmByCode),
+    [countriesAll, cpmByCode],
+  )
+  const mailEarn = useMemo(
+    () => sumCountryEarn(countries, cpmByCode),
+    [countries, cpmByCode],
+  )
 
   return (
     <div className="rt-root">
@@ -181,6 +245,17 @@ export default function RealtimeDashboard() {
         </button>
       </div>
 
+      <section className="rt-cpm-bar">
+        <p>
+          Estimated earning = country clicks × Ad Manager eCPM / 1000. CPM last 7 days ka Ad Exchange average hai, currency INR. 1 click = 1 impression.
+          {cpmPack?.fetchedAt ? ` CPM updated ${fmtTime(cpmPack.fetchedAt)}.` : ''}
+        </p>
+        <button type="button" onClick={() => loadCpm(true)} disabled={cpmLoading}>
+          {cpmLoading ? 'CPM load ho raha hai' : 'Refresh CPM'}
+        </button>
+      </section>
+      {cpmError ? <p className="rt-error">{cpmError}</p> : null}
+
       {mode === 'total' ? (
         <>
           <section className="rt-cards">
@@ -189,6 +264,8 @@ export default function RealtimeDashboard() {
             <article><span>Mails</span><strong>{fmtInt(emails.length)}</strong></article>
             <article><span>Countries</span><strong>{fmtInt(countriesAll.length)}</strong></article>
             <article><span>Links</span><strong>{fmtInt(links.length)}</strong></article>
+            <article><span>Estimated earning</span><strong>{fmtInr(totalEarn.earning)}</strong></article>
+            <article><span>Blended CPM</span><strong>{fmtInr(totalEarn.cpm)}</strong></article>
           </section>
 
           <section className="rt-card">
@@ -211,30 +288,28 @@ export default function RealtimeDashboard() {
                     <th>Clicks</th>
                     <th>Share</th>
                     <th>Unique IPs</th>
+                    <th>Est. earning</th>
                     <th>Countries</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredEmails.map((row, index) => (
+                  {filteredEmails.map((row, index) => {
+                    const earned = sumCountryEarn(nestedRows(row.byCountry, 'code'), cpmByCode)
+                    return (
                     <tr key={row.emailKey}>
                       <td>{index + 1}</td>
                       <td className="rt-strong">{row.email || 'Mail not linked'}</td>
                       <td>{fmtInt(row.hits)}</td>
                       <td><Bar value={row.hits} total={totals?.hits} /></td>
                       <td>{fmtInt(row.uniqueIps)}</td>
+                      <td>{fmtInr(cpmByCode ? earned.earning : null)}</td>
                       <td>
-                        <ul className="rt-chips">
-                          {nestedRows(row.byCountry, 'code').map((country) => (
-                            <li key={country.code}>
-                              {country.country || country.name || country.code}
-                              <b>{fmtInt(country.hits)}</b>
-                            </li>
-                          ))}
-                        </ul>
+                        <CountryBits rows={nestedRows(row.byCountry, 'code')} cpmByCode={cpmByCode} />
                       </td>
                     </tr>
-                  ))}
-                  {!filteredEmails.length ? <tr><td colSpan={6}>{emails.length ? 'Is search par koi mail nahi.' : 'Is date pe koi mail nahi.'}</td></tr> : null}
+                    )
+                  })}
+                  {!filteredEmails.length ? <tr><td colSpan={7}>{emails.length ? 'Is search par koi mail nahi.' : 'Is date pe koi mail nahi.'}</td></tr> : null}
                 </tbody>
               </table>
             </div>
@@ -251,6 +326,8 @@ export default function RealtimeDashboard() {
                     <th>Clicks</th>
                     <th>Share</th>
                     <th>Unique IPs</th>
+                    <th>eCPM</th>
+                    <th>Est. earning</th>
                     <th>Mails</th>
                   </tr>
                 </thead>
@@ -262,6 +339,8 @@ export default function RealtimeDashboard() {
                       <td>{fmtInt(row.hits)}</td>
                       <td><Bar value={row.hits} total={totals?.hits} /></td>
                       <td>{fmtInt(row.uniqueIps)}</td>
+                      <td>{fmtInr(cpmByCode?.[row.code]?.ecpm)}</td>
+                      <td>{fmtInr(countryEarn(row.hits, row.code, cpmByCode))}</td>
                       <td>
                         <ul className="rt-chips">
                           {nestedRows(row.byMail, 'emailKey').map((mail) => (
@@ -274,7 +353,7 @@ export default function RealtimeDashboard() {
                       </td>
                     </tr>
                   ))}
-                  {!countriesAll.length ? <tr><td colSpan={6}>Is date pe koi country nahi.</td></tr> : null}
+                  {!countriesAll.length ? <tr><td colSpan={8}>Is date pe koi country nahi.</td></tr> : null}
                 </tbody>
               </table>
             </div>
@@ -337,6 +416,14 @@ export default function RealtimeDashboard() {
               <span>Links</span>
               <strong>{fmtInt(mailLinks.length)}</strong>
             </article>
+            <article>
+              <span>Estimated earning</span>
+              <strong>{fmtInr(cpmByCode ? mailEarn.earning : null)}</strong>
+            </article>
+            <article>
+              <span>Blended CPM</span>
+              <strong>{fmtInr(cpmByCode ? mailEarn.cpm : null)}</strong>
+            </article>
           </section>
 
           <section className="rt-card">
@@ -350,6 +437,8 @@ export default function RealtimeDashboard() {
                     <th>Clicks</th>
                     <th>Share of this mail</th>
                     <th>Unique IPs</th>
+                    <th>eCPM</th>
+                    <th>Est. earning</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -360,6 +449,8 @@ export default function RealtimeDashboard() {
                       <td>{fmtInt(row.hits)}</td>
                       <td><Bar value={row.hits} total={mailHits} /></td>
                       <td>{fmtInt(row.uniqueIps)}</td>
+                      <td>{fmtInr(cpmByCode?.[row.code]?.ecpm)}</td>
+                      <td>{fmtInr(countryEarn(row.hits, row.code, cpmByCode))}</td>
                     </tr>
                   ))}
                   {countries.length ? (
@@ -369,11 +460,13 @@ export default function RealtimeDashboard() {
                       <td>{fmtInt(countries.reduce((sum, row) => sum + (Number(row.hits) || 0), 0))}</td>
                       <td>{pct(countries.reduce((sum, row) => sum + (Number(row.hits) || 0), 0), mailHits)}%</td>
                       <td>{fmtInt(selected.uniqueIps)}</td>
+                      <td>{fmtInr(cpmByCode ? mailEarn.cpm : null)}</td>
+                      <td>{fmtInr(cpmByCode ? mailEarn.earning : null)}</td>
                     </tr>
                   ) : null}
                   {!countries.length ? (
                     <tr>
-                      <td colSpan={5}>Is mail ka country split abhi nahi mila. Naya click aane ke baad yahan dikhega.</td>
+                      <td colSpan={7}>Is mail ka country split abhi nahi mila. Naya click aane ke baad yahan dikhega.</td>
                     </tr>
                   ) : null}
                 </tbody>
@@ -392,6 +485,7 @@ export default function RealtimeDashboard() {
                     <th>Clicks</th>
                     <th>Unique IPs</th>
                     <th>Country clicks</th>
+                    <th>Est. earning</th>
                     <th>Last country</th>
                     <th>Last hit</th>
                   </tr>
@@ -412,15 +506,16 @@ export default function RealtimeDashboard() {
                         <td>{fmtInt(row.hits)}</td>
                         <td>{fmtInt(row.uniqueIps)}</td>
                         <td>
-                          <CountryBits rows={linkCountries} />
+                          <CountryBits rows={linkCountries} cpmByCode={cpmByCode} />
                           {missing > 0 ? <div className="rt-muted">Untagged {fmtInt(missing)}</div> : null}
                         </td>
+                        <td>{fmtInr(cpmByCode ? sumCountryEarn(linkCountries, cpmByCode).earning : null)}</td>
                         <td>{row.lastCountry || '—'}</td>
                         <td>{fmtTime(row.lastAt)}</td>
                       </tr>
                     )
                   })}
-                  {!mailLinks.length ? <tr><td colSpan={7}>Is mail ka koi link is date pe nahi mila.</td></tr> : null}
+                  {!mailLinks.length ? <tr><td colSpan={8}>Is mail ka koi link is date pe nahi mila.</td></tr> : null}
                 </tbody>
               </table>
             </div>

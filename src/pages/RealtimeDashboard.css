@@ -81,9 +81,31 @@
   background: #3c4043;
 }
 
+.rt-cpm-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  background: #202124;
+  border: 1px solid #3c4043;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.rt-cpm-bar p {
+  margin: 0;
+  color: #9aa0a6;
+  font-size: 13px;
+}
+
+.rt-cpm-bar button {
+  flex: none;
+}
+
 .rt-cards {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
   margin-bottom: 14px;
 }
