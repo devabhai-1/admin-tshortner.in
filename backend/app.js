@@ -873,6 +873,185 @@ app.get('/api/analytics/stream', async (req, res) => {
     }
 });
 
+function numMetric(row, index) {
+  const raw = row?.metricValues?.[index]?.value;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function gaDateToIso(yyyymmdd) {
+  const s = String(yyyymmdd || '');
+  if (s.length !== 8) return s;
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+const DEMO_METRICS = [
+  'activeUsers',
+  'newUsers',
+  'engagedSessions',
+  'engagementRate',
+  'userEngagementDuration',
+  'eventCount',
+  'keyEvents',
+  'userKeyEventRate',
+  'totalRevenue',
+];
+
+async function runCountryReport(startDate, endDate) {
+  const metrics = DEMO_METRICS.map((name) => ({ name }));
+  try {
+    const [response] = await gaClient.runReport({
+      property: `properties/${PROPERTY_ID}`,
+      dimensions: [{ name: 'country' }],
+      metrics,
+      dateRanges: [{ startDate, endDate }],
+      metricAggregations: ['TOTAL'],
+      orderBys: [{ metric: { metricName: 'activeUsers' }, desc: true }],
+      limit: 250,
+    });
+    return response;
+  } catch (err) {
+    // Older properties may reject key-event metrics — retry without them.
+    const fallback = DEMO_METRICS.filter((n) => n !== 'keyEvents' && n !== 'userKeyEventRate');
+    const [response] = await gaClient.runReport({
+      property: `properties/${PROPERTY_ID}`,
+      dimensions: [{ name: 'country' }],
+      metrics: fallback.map((name) => ({ name })),
+      dateRanges: [{ startDate, endDate }],
+      metricAggregations: ['TOTAL'],
+      orderBys: [{ metric: { metricName: 'activeUsers' }, desc: true }],
+      limit: 250,
+    });
+    response._metricNames = fallback;
+    response._metricWarning = err.message;
+    return response;
+  }
+}
+
+app.get('/api/analytics/demographics', async (req, res) => {
+  try {
+    if (!gaClient) {
+      return res.status(500).json({ error: 'GA4 client not initialized' });
+    }
+
+    const today = formatDate(new Date());
+    const startDate = String(req.query.start_date || today).slice(0, 10);
+    const endDate = String(req.query.end_date || startDate).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      return res.status(400).json({ error: 'start_date and end_date must be YYYY-MM-DD' });
+    }
+    if (startDate > endDate) {
+      return res.status(400).json({ error: 'start_date cannot be after end_date' });
+    }
+
+    const countryRes = await runCountryReport(startDate, endDate);
+    const metricNames = countryRes._metricNames || DEMO_METRICS;
+    const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+
+    const mapRow = (row) => {
+      const activeUsers = numMetric(row, idx.activeUsers);
+      const engagedSessions = numMetric(row, idx.engagedSessions);
+      const duration = numMetric(row, idx.userEngagementDuration);
+      const engagementRate = numMetric(row, idx.engagementRate);
+      const keyEvents = idx.keyEvents == null ? 0 : numMetric(row, idx.keyEvents);
+      const userKeyEventRate = idx.userKeyEventRate == null ? 0 : numMetric(row, idx.userKeyEventRate);
+      return {
+        country: row.dimensionValues?.[0]?.value || '(not set)',
+        activeUsers,
+        newUsers: numMetric(row, idx.newUsers),
+        engagedSessions,
+        engagementRate,
+        engagedSessionsPerActiveUser: activeUsers ? engagedSessions / activeUsers : 0,
+        avgEngagementTime: activeUsers ? duration / activeUsers : 0,
+        eventCount: numMetric(row, idx.eventCount),
+        keyEvents,
+        userKeyEventRate,
+        totalRevenue: numMetric(row, idx.totalRevenue),
+      };
+    };
+
+    const rows = (countryRes.rows || []).map(mapRow);
+    const totalsRow = (countryRes.totals && countryRes.totals[0]) || null;
+    const totals = totalsRow
+      ? mapRow({ ...totalsRow, dimensionValues: [{ value: 'Total' }] })
+      : rows.reduce(
+          (acc, r) => {
+            acc.activeUsers += r.activeUsers;
+            acc.newUsers += r.newUsers;
+            acc.engagedSessions += r.engagedSessions;
+            acc.eventCount += r.eventCount;
+            acc.keyEvents += r.keyEvents;
+            acc.totalRevenue += r.totalRevenue;
+            acc._duration += r.avgEngagementTime * r.activeUsers;
+            return acc;
+          },
+          {
+            country: 'Total',
+            activeUsers: 0,
+            newUsers: 0,
+            engagedSessions: 0,
+            eventCount: 0,
+            keyEvents: 0,
+            totalRevenue: 0,
+            _duration: 0,
+          },
+        );
+
+    if (!totalsRow) {
+      totals.engagementRate = 0;
+      totals.engagedSessionsPerActiveUser = totals.activeUsers
+        ? totals.engagedSessions / totals.activeUsers
+        : 0;
+      totals.avgEngagementTime = totals.activeUsers ? totals._duration / totals.activeUsers : 0;
+      totals.userKeyEventRate = totals.activeUsers ? totals.keyEvents / totals.activeUsers : 0;
+    }
+    delete totals._duration;
+    totals.country = 'Total';
+
+    const topCountries = rows.slice(0, 8).map((r) => r.country);
+    const [seriesRes] = await gaClient.runReport({
+      property: `properties/${PROPERTY_ID}`,
+      dimensions: [{ name: 'date' }, { name: 'country' }],
+      metrics: [{ name: 'activeUsers' }],
+      dateRanges: [{ startDate, endDate }],
+      dimensionFilter: topCountries.length
+        ? {
+            filter: {
+              fieldName: 'country',
+              inListFilter: { values: topCountries },
+            },
+          }
+        : undefined,
+      orderBys: [{ dimension: { dimensionName: 'date' } }],
+      limit: 10000,
+    });
+
+    const seriesMap = new Map();
+    for (const r of seriesRes.rows || []) {
+      const date = gaDateToIso(r.dimensionValues?.[0]?.value);
+      const country = r.dimensionValues?.[1]?.value || '(not set)';
+      const users = Number(r.metricValues?.[0]?.value || 0);
+      if (!seriesMap.has(date)) seriesMap.set(date, { date });
+      seriesMap.get(date)[country] = users;
+    }
+    const series = Array.from(seriesMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    return res.json({
+      startDate,
+      endDate,
+      propertyId: PROPERTY_ID,
+      totals,
+      rows,
+      series,
+      seriesCountries: topCountries,
+      warning: countryRes._metricWarning || '',
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e.message || 'Demographics report failed' });
+  }
+});
+
 app.get('/api/health', (req, res) => {
     res.json({
         ok: true,
