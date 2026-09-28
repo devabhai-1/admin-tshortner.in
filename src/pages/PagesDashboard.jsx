@@ -106,6 +106,7 @@ export default function PagesDashboard() {
   const [draftEnd, setDraftEnd] = useState(isoDaysAgo(0))
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
+  const [mailQuery, setMailQuery] = useState('')
   const [pageSize, setPageSize] = useState(10)
   const [offset, setOffset] = useState(0)
   const [data, setData] = useState(null)
@@ -149,6 +150,12 @@ export default function PagesDashboard() {
 
   const totals = data?.totals
   const rows = data?.rows || []
+  const mailSearch = mailQuery.trim().toLowerCase()
+  const mails = useMemo(() => {
+    const list = data?.mails || []
+    if (!mailSearch) return list
+    return list.filter((row) => String(row.email || '').toLowerCase().includes(mailSearch))
+  }, [data, mailSearch])
   const rowCount = Number(data?.rowCount || 0)
   const page = Math.floor(offset / pageSize) + 1
   const pages = Math.max(1, Math.ceil(rowCount / pageSize))
@@ -215,6 +222,56 @@ export default function PagesDashboard() {
       </section>
 
       <section className="demo-card">
+        <div className="demo-card__head">
+          <h2>Mail wise views aur kamai</h2>
+          <span className="demo-note">{fmtInt(mails.length)} mails</span>
+        </div>
+        {data?.mailWarning ? <p className="demo-error">{data.mailWarning}</p> : null}
+        <div className="demo-toolbar">
+          <label>
+            Search mail
+            <input
+              type="search"
+              value={mailQuery}
+              placeholder="mail type karo"
+              onChange={(e) => setMailQuery(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="demo-table-wrap">
+          <table className="demo-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Mail</th>
+                <th>Pages</th>
+                <th>Total views</th>
+                <th>Share</th>
+                <th>Active users</th>
+                <th>Total revenue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mails.map((row, index) => (
+                <tr key={row.email}>
+                  <td>{index + 1}</td>
+                  <td>{row.email}</td>
+                  <td>{fmtInt(row.pages)}</td>
+                  <td>{fmtInt(row.views)}<small>{fmtShare(row.views, totals?.views)}</small></td>
+                  <td>{fmtShare(row.views, totals?.views)}</td>
+                  <td>{fmtInt(row.activeUsers)}</td>
+                  <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, totals?.totalRevenue)}</small></td>
+                </tr>
+              ))}
+              {!loading && !mails.length ? (
+                <tr><td colSpan={7}>Is range par koi mail nahi mili.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="demo-card">
         <div className="demo-toolbar">
           <label>
             Search page
@@ -246,6 +303,7 @@ export default function PagesDashboard() {
               <tr>
                 <th>#</th>
                 <th>Page path and screen class</th>
+                <th>Mail</th>
                 <th>Views</th>
                 <th>Active users</th>
                 <th>Views per user</th>
@@ -260,6 +318,7 @@ export default function PagesDashboard() {
                 <tr className="demo-total">
                   <td />
                   <td>Total</td>
+                  <td />
                   <td>{fmtInt(totals.views)}<small>100%</small></td>
                   <td>{fmtInt(totals.activeUsers)}<small>100%</small></td>
                   <td>{fmtDec(totals.viewsPerUser)}</td>
@@ -273,6 +332,7 @@ export default function PagesDashboard() {
                 <tr key={row.path}>
                   <td>{offset + index + 1}</td>
                   <td>{row.path}</td>
+                  <td>{row.emails?.length ? row.emails.join(', ') : '—'}</td>
                   <td>{fmtInt(row.views)}<small>{fmtShare(row.views, totals?.views)}</small></td>
                   <td>{fmtInt(row.activeUsers)}<small>{fmtShare(row.activeUsers, totals?.activeUsers)}</small></td>
                   <td>{fmtDec(row.viewsPerUser)}</td>
@@ -283,7 +343,7 @@ export default function PagesDashboard() {
                 </tr>
               ))}
               {!loading && !rows.length ? (
-                <tr><td colSpan={9}>Is range par koi page nahi mila.</td></tr>
+                <tr><td colSpan={10}>Is range par koi page nahi mila.</td></tr>
               ) : null}
             </tbody>
           </table>
