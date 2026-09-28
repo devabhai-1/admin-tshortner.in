@@ -192,7 +192,10 @@
   text-align: left;
 }
 
-.demo-table th {
+.demo-table tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
+}
   color: #9aa0a6;
   font-weight: 500;
   position: sticky;

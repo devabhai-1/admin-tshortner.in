@@ -4,12 +4,19 @@ import AdminSectionNav from '../components/AdminSectionNav.jsx'
 import './DemographicDashboard.css'
 
 function isoDaysAgo(n) {
-  const d = new Date()
-  d.setDate(d.getDate() - n)
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
+  const [y, m, d] = parts.split('-').map(Number)
+  const date = new Date(Date.UTC(y, m - 1, d))
+  date.setUTCDate(date.getUTCDate() - n)
+  const yy = date.getUTCFullYear()
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(date.getUTCDate()).padStart(2, '0')
+  return `${yy}-${mm}-${dd}`
 }
 
 function fmtInt(n) {
@@ -106,60 +113,90 @@ function ViewsChart({ series, paths }) {
 }
 
 export default function PagesDashboard() {
-  const [startDate, setStartDate] = useState(isoDaysAgo(6))
+  const [startDate, setStartDate] = useState(isoDaysAgo(0))
   const [endDate, setEndDate] = useState(isoDaysAgo(0))
-  const [draftStart, setDraftStart] = useState(isoDaysAgo(6))
+  const [draftStart, setDraftStart] = useState(isoDaysAgo(0))
   const [draftEnd, setDraftEnd] = useState(isoDaysAgo(0))
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [mailQuery, setMailQuery] = useState('')
   const [mailSort, setMailSort] = useState('cpm')
-  const [pageSize, setPageSize] = useState(10)
-  const [offset, setOffset] = useState(0)
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [loaded, setLoaded] = useState(0)
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setSearch(query.trim())
-      setOffset(0)
-    }, 350)
+    const timer = setTimeout(() => setSearch(query.trim()), 350)
     return () => clearTimeout(timer)
   }, [query])
 
   useEffect(() => {
     const ctrl = new AbortController()
-    setLoading(true)
-    setError('')
-    const params = new URLSearchParams({
-      start_date: startDate,
-      end_date: endDate,
-      limit: String(pageSize),
-      offset: String(offset),
-    })
-    if (search) params.set('q', search)
-    apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
-      .then(async (res) => {
-        const body = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(body.error || 'Pages report nahi aaya')
-        setData(body)
-      })
-      .catch((err) => {
-        if (err.name === 'AbortError') return
+    let stop = false
+    async function loadAll() {
+      setLoading(true)
+      setError('')
+      setLoaded(0)
+      setData(null)
+      const allRows = []
+      let offset = 0
+      const limit = 2000
+      let last = null
+      try {
+        while (!stop) {
+          const params = new URLSearchParams({
+            start_date: startDate,
+            end_date: endDate,
+            limit: String(limit),
+            offset: String(offset),
+          })
+          if (search) params.set('q', search)
+          const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(body.error || 'Pages report nahi aaya')
+          const batch = body.rows || []
+          allRows.push(...batch)
+          last = body
+          offset += batch.length
+          setLoaded(allRows.length)
+          setData({ ...body, rows: allRows.slice() })
+          const total = Number(body.rowCount || 0)
+          if (!batch.length || offset >= total) break
+        }
+      } catch (err) {
+        if (err.name === 'AbortError' || stop) return
         setError(err.message || 'Pages report nahi aaya')
-      })
-      .finally(() => {
-        if (!ctrl.signal.aborted) setLoading(false)
-      })
-    return () => ctrl.abort()
-  }, [startDate, endDate, pageSize, offset, search])
+        if (last) setData({ ...last, rows: allRows.slice() })
+      } finally {
+        if (!stop) setLoading(false)
+      }
+    }
+    loadAll()
+    return () => {
+      stop = true
+      ctrl.abort()
+    }
+  }, [startDate, endDate, search])
 
   const totals = data?.totals
   const rows = data?.rows || []
   const mailSearch = mailQuery.trim().toLowerCase()
   const mails = useMemo(() => {
-    const list = (data?.mails || []).filter((row) => {
+    const map = new Map()
+    for (const row of data?.rows || []) {
+      const owners = row.emails?.length ? row.emails : ['Mail not linked']
+      const share = owners.length
+      for (const email of owners) {
+        if (!map.has(email)) map.set(email, { email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 })
+        const item = map.get(email)
+        item.pages += 1
+        item.views += (Number(row.views) || 0) / share
+        item.activeUsers += (Number(row.activeUsers) || 0) / share
+        item.totalRevenue += (Number(row.totalRevenue) || 0) / share
+      }
+    }
+    const list = Array.from(map.values()).filter((row) => {
       if (!mailSearch) return true
       return String(row.email || '').toLowerCase().includes(mailSearch)
     })
@@ -171,8 +208,7 @@ export default function PagesDashboard() {
     return list.sort((a, b) => value(b) - value(a))
   }, [data, mailSearch, mailSort])
   const rowCount = Number(data?.rowCount || 0)
-  const page = Math.floor(offset / pageSize) + 1
-  const pages = Math.max(1, Math.ceil(rowCount / pageSize))
+  const allLoaded = rowCount > 0 && loaded >= rowCount
   const legend = useMemo(() => ['Total', ...(data?.seriesPaths || [])], [data])
 
   const applyRange = (start, end) => {
@@ -180,7 +216,6 @@ export default function PagesDashboard() {
     setDraftEnd(end)
     setStartDate(start)
     setEndDate(end)
-    setOffset(0)
   }
 
   return (
@@ -217,7 +252,9 @@ export default function PagesDashboard() {
         <button type="button" onClick={() => applyRange(isoDaysAgo(0), isoDaysAgo(0))}>Today</button>
         <button type="button" onClick={() => applyRange(isoDaysAgo(6), isoDaysAgo(0))}>Last 7 days</button>
         <button type="button" onClick={() => applyRange(isoDaysAgo(27), isoDaysAgo(0))}>Last 28 days</button>
-        <span className="demo-count">{fmtInt(rowCount)} pages</span>
+        <span className="demo-count">
+          {loading ? `Rows ${fmtInt(loaded)} / ${fmtInt(rowCount || loaded)}` : `${fmtInt(rows.length)} / ${fmtInt(rowCount)} rows loaded`}
+        </span>
       </div>
 
       {error ? <p className="demo-error">{error}</p> : null}
@@ -280,7 +317,7 @@ export default function PagesDashboard() {
                 <tr className="demo-total">
                   <td />
                   <td>Total</td>
-                  <td>{fmtInt((data?.mails || []).reduce((sum, row) => sum + (Number(row.pages) || 0), 0))}</td>
+                  <td>{fmtInt(rows.length)}</td>
                   <td>{fmtInt(totals.views)}</td>
                   <td>100%</td>
                   <td>{fmtInt(totals.activeUsers)}</td>
@@ -319,20 +356,7 @@ export default function PagesDashboard() {
               onChange={(e) => setQuery(e.target.value)}
             />
           </label>
-          <label>
-            Rows
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value))
-                setOffset(0)
-              }}
-            >
-              <option value={10}>10</option>
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-            </select>
-          </label>
+          <span className="demo-note">{allLoaded ? 'Is date ki saari rows load ho gayi.' : 'Saari rows load ho rahi hain.'}</span>
         </div>
         <div className="demo-table-wrap">
           <table className="demo-table">
@@ -369,7 +393,7 @@ export default function PagesDashboard() {
               ) : null}
               {rows.map((row, index) => (
                 <tr key={row.path}>
-                  <td>{offset + index + 1}</td>
+                  <td>{index + 1}</td>
                   <td>{row.path}</td>
                   <td>{row.emails?.length ? row.emails.join(', ') : '—'}</td>
                   <td>{fmtInt(row.views)}<small>{fmtShare(row.views, totals?.views)}</small></td>
@@ -388,12 +412,11 @@ export default function PagesDashboard() {
             </tbody>
           </table>
         </div>
-        <div className="demo-pager">
-          <span className="demo-count">{offset + 1}–{Math.min(offset + rows.length, rowCount)} of {fmtInt(rowCount)}</span>
-          <button type="button" disabled={offset <= 0 || loading} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Prev</button>
-          <span className="demo-count">{page} / {pages}</span>
-          <button type="button" disabled={offset + pageSize >= rowCount || loading} onClick={() => setOffset(offset + pageSize)}>Next</button>
-        </div>
+        <p className="demo-count">
+          {fmtInt(rows.length)} rows dikh rahi hain
+          {rowCount ? ` / ${fmtInt(rowCount)} total` : ''}
+          {allLoaded ? ' · complete' : ''}
+        </p>
       </section>
     </div>
   )

@@ -1107,8 +1107,6 @@ function pathCode(path) {
   return parts[parts.length - 1].trim().toLowerCase();
 }
 
-const MAIL_ROLLUP_CACHE = new Map();
-
 async function codeToEmails() {
   const fbMap = await firebaseMappingCached();
   const out = new Map();
@@ -1121,59 +1119,6 @@ async function codeToEmails() {
     }
   }
   return out;
-}
-
-async function mailRollup(startDate, endDate, q) {
-  const key = `${startDate}|${endDate}|${q}`;
-  const hit = MAIL_ROLLUP_CACHE.get(key);
-  if (hit && Date.now() - hit.at < 180000) return hit.data;
-
-  const emailsByCode = await codeToEmails();
-  const names = ['screenPageViews', 'activeUsers', 'totalRevenue'];
-  const mails = new Map();
-  let offset = 0;
-  const pageSize = 10000;
-  for (let guard = 0; guard < 15; guard += 1) {
-    const report = await runPagesReport(startDate, endDate, { limit: pageSize, offset, q, metrics: names });
-    const rows = report.rows || [];
-    if (!rows.length) break;
-    for (const row of rows) {
-      const path = row.dimensionValues?.[0]?.value || '';
-      const views = Number(row.metricValues?.[0]?.value || 0);
-      const users = Number(row.metricValues?.[1]?.value || 0);
-      const revenue = Number(row.metricValues?.[2]?.value || 0);
-      const owners = emailsByCode.get(pathCode(path));
-      const list = owners?.length ? owners : ['Mail not linked'];
-      const share = list.length;
-      for (const email of list) {
-        if (!mails.has(email)) {
-          mails.set(email, { email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 });
-        }
-        const item = mails.get(email);
-        item.pages += 1;
-        item.views += views / share;
-        item.activeUsers += users / share;
-        item.totalRevenue += revenue / share;
-      }
-    }
-    offset += rows.length;
-    const total = Number(report.rowCount || 0);
-    if (rows.length < pageSize || (total && offset >= total)) break;
-  }
-
-  const data = {
-    emailsByCode,
-    mails: Array.from(mails.values())
-      .map((item) => ({
-        ...item,
-        views: Math.round(item.views),
-        activeUsers: Math.round(item.activeUsers),
-        totalRevenue: Math.round(item.totalRevenue * 100) / 100,
-      }))
-      .sort((a, b) => b.totalRevenue - a.totalRevenue || b.views - a.views),
-  };
-  MAIL_ROLLUP_CACHE.set(key, { at: Date.now(), data });
-  return data;
 }
 
 app.get('/api/analytics/pages', async (req, res) => {
@@ -1192,17 +1137,19 @@ app.get('/api/analytics/pages', async (req, res) => {
       return res.status(400).json({ error: 'start_date cannot be after end_date' });
     }
 
-    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || '10', 10) || 10));
+    const limit = Math.max(1, Math.min(5000, parseInt(req.query.limit || '2000', 10) || 2000));
     const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
     const q = String(req.query.q || '').trim().slice(0, 120);
 
-    const [report, rollup] = await Promise.all([
-      runPagesReport(startDate, endDate, { limit, offset, q }),
-      mailRollup(startDate, endDate, q).catch((err) => {
-        console.error('mail rollup', err);
-        return { mails: [], emailsByCode: new Map(), error: err.message || 'Mail map nahi bana' };
-      }),
-    ]);
+    let emailsByCode = new Map();
+    let mailWarning = '';
+    try {
+      emailsByCode = await codeToEmails();
+    } catch (err) {
+      console.error('mail map', err);
+      mailWarning = err.message || 'Mail map nahi bana';
+    }
+    const report = await runPagesReport(startDate, endDate, { limit, offset, q });
     const metricNames = report._metricNames || PAGE_METRICS;
     const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
 
@@ -1224,7 +1171,7 @@ app.get('/api/analytics/pages', async (req, res) => {
 
     const rows = (report.rows || []).map((row) => {
       const mapped = mapRow(row);
-      const owners = rollup.emailsByCode?.get?.(pathCode(mapped.path)) || [];
+      const owners = emailsByCode.get(pathCode(mapped.path)) || [];
       mapped.emails = owners;
       return mapped;
     });
@@ -1304,8 +1251,8 @@ app.get('/api/analytics/pages', async (req, res) => {
       currency: 'INR',
       totals,
       rows,
-      mails: rollup.mails || [],
-      mailWarning: rollup.error || '',
+      mails: [],
+      mailWarning,
       series: Array.from(seriesMap.values()).sort((a, b) => a.date.localeCompare(b.date)),
       seriesPaths: topPaths,
     });
