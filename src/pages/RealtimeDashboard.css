@@ -113,6 +113,31 @@
   font-weight: 500;
 }
 
+.rt-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.rt-modes button {
+  background: #202124;
+  color: #e8eaed;
+  border: 1px solid #3c4043;
+  border-radius: 12px;
+  padding: 14px 16px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rt-modes button.active {
+  background: #8ab4f8;
+  color: #202124;
+  border-color: #8ab4f8;
+}
+
 .rt-picker {
   display: flex;
   flex-direction: column;
