@@ -55,9 +55,23 @@ function Bar({ value, total }) {
   const share = pct(value, total)
   return (
     <div className="rt-bar" title={`${share}%`}>
-      <span style={{ width: `${Math.min(100, share)}%` }} />
+      <i><span style={{ width: `${Math.min(100, share)}%` }} /></i>
       <em>{share}%</em>
     </div>
+  )
+}
+
+function CountryBits({ rows }) {
+  if (!rows.length) return '—'
+  return (
+    <ul className="rt-chips">
+      {rows.map((country) => (
+        <li key={country.code}>
+          {country.name || country.country || country.code}
+          <b>{fmtInt(country.hits)}</b>
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -324,6 +338,15 @@ export default function RealtimeDashboard() {
                       <td>{fmtInt(row.uniqueIps)}</td>
                     </tr>
                   ))}
+                  {countries.length ? (
+                    <tr className="rt-total-row">
+                      <td />
+                      <td>Total</td>
+                      <td>{fmtInt(countries.reduce((sum, row) => sum + (Number(row.hits) || 0), 0))}</td>
+                      <td>{pct(countries.reduce((sum, row) => sum + (Number(row.hits) || 0), 0), mailHits)}%</td>
+                      <td>{fmtInt(selected.uniqueIps)}</td>
+                    </tr>
+                  ) : null}
                   {!countries.length ? (
                     <tr>
                       <td colSpan={5}>Is mail ka country split abhi nahi mila. Naya click aane ke baad yahan dikhega.</td>
@@ -340,18 +363,23 @@ export default function RealtimeDashboard() {
               <table>
                 <thead>
                   <tr>
+                    <th>#</th>
                     <th>Link</th>
                     <th>Clicks</th>
                     <th>Unique IPs</th>
-                    <th>Countries</th>
+                    <th>Country clicks</th>
+                    <th>Last country</th>
                     <th>Last hit</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {mailLinks.map((row) => {
+                  {mailLinks.map((row, index) => {
                     const linkCountries = nestedRows(row.byCountry, 'code')
+                    const tagged = linkCountries.reduce((sum, country) => sum + (Number(country.hits) || 0), 0)
+                    const missing = Math.max(0, (Number(row.hits) || 0) - tagged)
                     return (
                       <tr key={row.code}>
+                        <td>{index + 1}</td>
                         <td>
                           <a href={`https://teraboxlinke.com/x/${row.code}`} target="_blank" rel="noreferrer">
                             /x/{row.code}
@@ -360,24 +388,15 @@ export default function RealtimeDashboard() {
                         <td>{fmtInt(row.hits)}</td>
                         <td>{fmtInt(row.uniqueIps)}</td>
                         <td>
-                          {linkCountries.length ? (
-                            <ul className="rt-chips">
-                              {linkCountries.map((country) => (
-                                <li key={country.code}>
-                                  {country.name || country.code}
-                                  <b>{fmtInt(country.hits)}</b>
-                                </li>
-                              ))}
-                            </ul>
-                          ) : (
-                            row.lastCountry || '—'
-                          )}
+                          <CountryBits rows={linkCountries} />
+                          {missing > 0 ? <div className="rt-muted">Untagged {fmtInt(missing)}</div> : null}
                         </td>
+                        <td>{row.lastCountry || '—'}</td>
                         <td>{fmtTime(row.lastAt)}</td>
                       </tr>
                     )
                   })}
-                  {!mailLinks.length ? <tr><td colSpan={5}>Is mail ka koi link is date pe nahi mila.</td></tr> : null}
+                  {!mailLinks.length ? <tr><td colSpan={7}>Is mail ka koi link is date pe nahi mila.</td></tr> : null}
                 </tbody>
               </table>
             </div>
