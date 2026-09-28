@@ -45,6 +45,12 @@ function fmtInr(n) {
   }).format(Number(n) || 0)
 }
 
+function cpmOf(revenue, views) {
+  const count = Number(views) || 0
+  if (!count) return 0
+  return ((Number(revenue) || 0) / count) * 1000
+}
+
 function shortDate(iso) {
   if (!iso) return ''
   const [, m, d] = iso.split('-')
@@ -107,6 +113,7 @@ export default function PagesDashboard() {
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [mailQuery, setMailQuery] = useState('')
+  const [mailSort, setMailSort] = useState('cpm')
   const [pageSize, setPageSize] = useState(10)
   const [offset, setOffset] = useState(0)
   const [data, setData] = useState(null)
@@ -152,10 +159,17 @@ export default function PagesDashboard() {
   const rows = data?.rows || []
   const mailSearch = mailQuery.trim().toLowerCase()
   const mails = useMemo(() => {
-    const list = data?.mails || []
-    if (!mailSearch) return list
-    return list.filter((row) => String(row.email || '').toLowerCase().includes(mailSearch))
-  }, [data, mailSearch])
+    const list = (data?.mails || []).filter((row) => {
+      if (!mailSearch) return true
+      return String(row.email || '').toLowerCase().includes(mailSearch)
+    })
+    const value = (row) => {
+      if (mailSort === 'views') return Number(row.views) || 0
+      if (mailSort === 'cpm') return cpmOf(row.totalRevenue, row.views)
+      return Number(row.totalRevenue) || 0
+    }
+    return list.sort((a, b) => value(b) - value(a))
+  }, [data, mailSearch, mailSort])
   const rowCount = Number(data?.rowCount || 0)
   const page = Math.floor(offset / pageSize) + 1
   const pages = Math.max(1, Math.ceil(rowCount / pageSize))
@@ -237,7 +251,16 @@ export default function PagesDashboard() {
               onChange={(e) => setMailQuery(e.target.value)}
             />
           </label>
+          <label>
+            Hisaab
+            <select value={mailSort} onChange={(e) => setMailSort(e.target.value)}>
+              <option value="cpm">CPM ke hisaab se</option>
+              <option value="revenue">Kamai ke hisaab se</option>
+              <option value="views">Views ke hisaab se</option>
+            </select>
+          </label>
         </div>
+        <p className="demo-note">CPM = kamai ÷ views × 1000. Yeh 1000 views par kitni kamai hai, rupee mein.</p>
         <div className="demo-table-wrap">
           <table className="demo-table">
             <thead>
@@ -249,9 +272,22 @@ export default function PagesDashboard() {
                 <th>Share</th>
                 <th>Active users</th>
                 <th>Total revenue</th>
+                <th>CPM</th>
               </tr>
             </thead>
             <tbody>
+              {totals ? (
+                <tr className="demo-total">
+                  <td />
+                  <td>Total</td>
+                  <td>{fmtInt((data?.mails || []).reduce((sum, row) => sum + (Number(row.pages) || 0), 0))}</td>
+                  <td>{fmtInt(totals.views)}</td>
+                  <td>100%</td>
+                  <td>{fmtInt(totals.activeUsers)}</td>
+                  <td>{fmtInr(totals.totalRevenue)}</td>
+                  <td>{fmtInr(cpmOf(totals.totalRevenue, totals.views))}</td>
+                </tr>
+              ) : null}
               {mails.map((row, index) => (
                 <tr key={row.email}>
                   <td>{index + 1}</td>
@@ -261,10 +297,11 @@ export default function PagesDashboard() {
                   <td>{fmtShare(row.views, totals?.views)}</td>
                   <td>{fmtInt(row.activeUsers)}</td>
                   <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, totals?.totalRevenue)}</small></td>
+                  <td>{fmtInr(cpmOf(row.totalRevenue, row.views))}</td>
                 </tr>
               ))}
               {!loading && !mails.length ? (
-                <tr><td colSpan={7}>Is range par koi mail nahi mili.</td></tr>
+                <tr><td colSpan={8}>Is range par koi mail nahi mili.</td></tr>
               ) : null}
             </tbody>
           </table>
@@ -311,6 +348,7 @@ export default function PagesDashboard() {
                 <th>Event count</th>
                 <th>Key events</th>
                 <th>Total revenue</th>
+                <th>CPM</th>
               </tr>
             </thead>
             <tbody>
@@ -326,6 +364,7 @@ export default function PagesDashboard() {
                   <td>{fmtInt(totals.eventCount)}<small>100%</small></td>
                   <td>{fmtInt(totals.keyEvents)}</td>
                   <td>{fmtInr(totals.totalRevenue)}<small>100%</small></td>
+                  <td>{fmtInr(cpmOf(totals.totalRevenue, totals.views))}</td>
                 </tr>
               ) : null}
               {rows.map((row, index) => (
@@ -340,10 +379,11 @@ export default function PagesDashboard() {
                   <td>{fmtInt(row.eventCount)}<small>{fmtShare(row.eventCount, totals?.eventCount)}</small></td>
                   <td>{fmtInt(row.keyEvents)}</td>
                   <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, totals?.totalRevenue)}</small></td>
+                  <td>{fmtInr(cpmOf(row.totalRevenue, row.views))}</td>
                 </tr>
               ))}
               {!loading && !rows.length ? (
-                <tr><td colSpan={10}>Is range par koi page nahi mila.</td></tr>
+                <tr><td colSpan={11}>Is range par koi page nahi mila.</td></tr>
               ) : null}
             </tbody>
           </table>
