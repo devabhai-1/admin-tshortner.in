@@ -113,40 +113,36 @@
   font-weight: 500;
 }
 
-.rt-tabs {
+.rt-picker {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
-}
-
-.rt-tabs button {
-  background: #303134;
-  color: #e8eaed;
+  margin-bottom: 16px;
+  background: #202124;
   border: 1px solid #3c4043;
-  border-radius: 999px;
-  padding: 8px 14px;
-  cursor: pointer;
-  font: inherit;
+  border-radius: 12px;
+  padding: 16px;
 }
 
-.rt-tabs button.active {
-  background: #8ab4f8;
-  color: #202124;
-  border-color: #8ab4f8;
-  font-weight: 700;
+.rt-picker label {
+  font-size: 13px;
+  color: #9aa0a6;
 }
 
-.rt-tabs input {
-  margin-left: auto;
-  min-width: min(320px, 100%);
+.rt-picker select {
+  width: min(640px, 100%);
   background: #1f1f1f;
   color: #e8eaed;
-  border: 1px solid #3c4043;
-  border-radius: 8px;
-  padding: 8px 10px;
+  border: 1px solid #8ab4f8;
+  border-radius: 10px;
+  padding: 12px 14px;
   font: inherit;
+  font-size: 16px;
+}
+
+.rt-mail {
+  font-size: 16px !important;
+  word-break: break-all;
 }
 
 .rt-hint,
