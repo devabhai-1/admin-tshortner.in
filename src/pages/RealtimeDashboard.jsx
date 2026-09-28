@@ -80,6 +80,7 @@ export default function RealtimeDashboard() {
   const [mode, setMode] = useState('total')
   const [day, setDay] = useState(todayKey)
   const [mailKey, setMailKey] = useState('')
+  const [mailQuery, setMailQuery] = useState('')
   const [totals, setTotals] = useState(null)
   const [emails, setEmails] = useState([])
   const [countriesAll, setCountriesAll] = useState([])
@@ -140,6 +141,11 @@ export default function RealtimeDashboard() {
   }, [events, selected])
 
   const mailHits = Number(selected?.hits) || 0
+  const mailSearch = mailQuery.trim().toLowerCase()
+  const filteredEmails = useMemo(() => {
+    if (!mailSearch) return emails
+    return emails.filter((row) => String(row.email || '').toLowerCase().includes(mailSearch))
+  }, [emails, mailSearch])
 
   return (
     <div className="rt-root">
@@ -186,7 +192,16 @@ export default function RealtimeDashboard() {
           </section>
 
           <section className="rt-card">
-            <h2>Saari mails</h2>
+            <div className="rt-card-head">
+              <h2>Saari mails</h2>
+              <input
+                className="rt-search"
+                type="search"
+                value={mailQuery}
+                placeholder="Mail search karo"
+                onChange={(e) => setMailQuery(e.target.value)}
+              />
+            </div>
             <div className="rt-table-wrap">
               <table>
                 <thead>
@@ -200,7 +215,7 @@ export default function RealtimeDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {emails.map((row, index) => (
+                  {filteredEmails.map((row, index) => (
                     <tr key={row.emailKey}>
                       <td>{index + 1}</td>
                       <td className="rt-strong">{row.email || 'Mail not linked'}</td>
@@ -219,7 +234,7 @@ export default function RealtimeDashboard() {
                       </td>
                     </tr>
                   ))}
-                  {!emails.length ? <tr><td colSpan={6}>Is date pe koi mail nahi.</td></tr> : null}
+                  {!filteredEmails.length ? <tr><td colSpan={6}>{emails.length ? 'Is search par koi mail nahi.' : 'Is date pe koi mail nahi.'}</td></tr> : null}
                 </tbody>
               </table>
             </div>
@@ -270,6 +285,15 @@ export default function RealtimeDashboard() {
       {mode === 'special' ? (
       <>
       <section className="rt-picker">
+        <label htmlFor="mail-search">Search mail</label>
+        <input
+          id="mail-search"
+          className="rt-search"
+          type="search"
+          value={mailQuery}
+          placeholder="Mail type karo, jaise surajchy"
+          onChange={(e) => setMailQuery(e.target.value)}
+        />
         <label htmlFor="mail-select">Select mail</label>
         <select
           id="mail-select"
@@ -277,13 +301,13 @@ export default function RealtimeDashboard() {
           onChange={(e) => setMailKey(e.target.value)}
         >
           <option value="">— Mail choose karo —</option>
-          {emails.map((row) => (
+          {filteredEmails.map((row) => (
             <option key={row.emailKey} value={row.emailKey}>
               {(row.email || 'Mail not linked')} · {fmtInt(row.hits)} clicks
             </option>
           ))}
         </select>
-        <span className="rt-muted">{fmtInt(emails.length)} mails on this date</span>
+        <span className="rt-muted">{fmtInt(filteredEmails.length)} / {fmtInt(emails.length)} mails</span>
       </section>
 
       {!selected ? (

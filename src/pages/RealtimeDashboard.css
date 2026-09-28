@@ -154,6 +154,30 @@
   color: #9aa0a6;
 }
 
+.rt-search {
+  width: min(640px, 100%);
+  background: #1f1f1f;
+  color: #e8eaed;
+  border: 1px solid #8ab4f8;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 16px;
+}
+
+.rt-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.rt-card .rt-card-head h2 {
+  margin: 0;
+}
+
 .rt-picker select {
   width: min(640px, 100%);
   background: #1f1f1f;
