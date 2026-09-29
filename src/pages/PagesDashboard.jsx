@@ -183,6 +183,7 @@ export default function PagesDashboard() {
   const rows = data?.rows || []
   const mailSearch = mailQuery.trim().toLowerCase()
   const mails = useMemo(() => {
+    const MIN_VIEWS = 500
     const map = new Map()
     for (const row of data?.rows || []) {
       const owners = row.emails?.length ? row.emails : ['Mail not linked']
@@ -200,12 +201,28 @@ export default function PagesDashboard() {
       if (!mailSearch) return true
       return String(row.email || '').toLowerCase().includes(mailSearch)
     })
-    const value = (row) => {
-      if (mailSort === 'views') return Number(row.views) || 0
-      if (mailSort === 'cpm') return cpmOf(row.totalRevenue, row.views)
-      return Number(row.totalRevenue) || 0
-    }
-    return list.sort((a, b) => value(b) - value(a))
+    return list.sort((a, b) => {
+      const aViews = Number(a.views) || 0
+      const bViews = Number(b.views) || 0
+      const aBand = aViews >= MIN_VIEWS ? 0 : 1
+      const bBand = bViews >= MIN_VIEWS ? 0 : 1
+      if (aBand !== bBand) return aBand - bBand
+
+      if (mailSort === 'cpm') {
+        const aCpm = cpmOf(a.totalRevenue, aViews)
+        const bCpm = cpmOf(b.totalRevenue, bViews)
+        if (aCpm !== bCpm) return aCpm - bCpm
+        return bViews - aViews
+      }
+      if (mailSort === 'views') {
+        if (bViews !== aViews) return bViews - aViews
+        return cpmOf(a.totalRevenue, aViews) - cpmOf(b.totalRevenue, bViews)
+      }
+      const aEarn = Number(a.totalRevenue) || 0
+      const bEarn = Number(b.totalRevenue) || 0
+      if (bEarn !== aEarn) return bEarn - aEarn
+      return bViews - aViews
+    })
   }, [data, mailSearch, mailSort])
   const rowCount = Number(data?.rowCount || 0)
   const allLoaded = rowCount > 0 && loaded >= rowCount
@@ -291,13 +308,16 @@ export default function PagesDashboard() {
           <label>
             Hisaab
             <select value={mailSort} onChange={(e) => setMailSort(e.target.value)}>
-              <option value="cpm">CPM ke hisaab se</option>
-              <option value="revenue">Kamai ke hisaab se</option>
-              <option value="views">Views ke hisaab se</option>
+              <option value="cpm">Low CPM pehle (500+ views)</option>
+              <option value="revenue">Kamai ke hisaab se (500+ views)</option>
+              <option value="views">Views ke hisaab se (500+ views)</option>
             </select>
           </label>
         </div>
-        <p className="demo-note">CPM = kamai ÷ views × 1000. Yeh 1000 views par kitni kamai hai, rupee mein.</p>
+        <p className="demo-note">
+          500+ views wali mails upar. 500 se kam views wali hamesha niche.
+          CPM sort pe upar group mein sabse kam CPM pehle. CPM = kamai ÷ views × 1000 (₹).
+        </p>
         <div className="demo-table-wrap">
           <table className="demo-table">
             <thead>
@@ -325,10 +345,16 @@ export default function PagesDashboard() {
                   <td>{fmtInr(cpmOf(totals.totalRevenue, totals.views))}</td>
                 </tr>
               ) : null}
-              {mails.map((row, index) => (
-                <tr key={row.email}>
+              {mails.map((row, index) => {
+                const views = Number(row.views) || 0
+                const low = views < 500
+                return (
+                <tr key={row.email} className={low ? 'demo-low-views' : undefined}>
                   <td>{index + 1}</td>
-                  <td>{row.email}</td>
+                  <td>
+                    {row.email}
+                    {low ? <small>500 se kam views</small> : null}
+                  </td>
                   <td>{fmtInt(row.pages)}</td>
                   <td>{fmtInt(row.views)}<small>{fmtShare(row.views, totals?.views)}</small></td>
                   <td>{fmtShare(row.views, totals?.views)}</td>
@@ -336,7 +362,8 @@ export default function PagesDashboard() {
                   <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, totals?.totalRevenue)}</small></td>
                   <td>{fmtInr(cpmOf(row.totalRevenue, row.views))}</td>
                 </tr>
-              ))}
+                )
+              })}
               {!loading && !mails.length ? (
                 <tr><td colSpan={8}>Is range par koi mail nahi mili.</td></tr>
               ) : null}

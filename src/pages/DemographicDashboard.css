@@ -214,6 +214,10 @@
   background: #292a2d;
 }
 
+.demo-low-views td {
+  opacity: 0.72;
+}
+
 .demo-pager {
   justify-content: flex-end;
   margin-top: 12px;
