@@ -1104,21 +1104,61 @@ function pathCode(path) {
   const clean = String(path || '').split('?')[0].replace(/\/+$/, '');
   const parts = clean.split('/').filter(Boolean);
   if (!parts.length) return '';
-  return parts[parts.length - 1].trim().toLowerCase();
+  return parts[parts.length - 1].trim();
 }
 
-async function codeToEmails() {
-  const fbMap = await firebaseMappingCached();
-  const out = new Map();
-  for (const email of Object.keys(fbMap || {})) {
-    for (const ent of fbMap[email] || []) {
-      const lid = ent.id;
-      if (!lid) continue;
-      if (!out.has(lid)) out.set(lid, []);
-      if (!out.get(lid).includes(email)) out.get(lid).push(email);
+function emailsFromUsers(users) {
+  if (!users || typeof users !== 'object') return [];
+  const emails = [];
+  for (const [key, val] of Object.entries(users)) {
+    if (!val) continue;
+    const email = String(key).replace(/,/g, '.');
+    if (email.includes('@') && !emails.includes(email)) emails.push(email);
+  }
+  return emails;
+}
+
+const OWNER_CACHE = new Map();
+
+async function lookupOwners(codes) {
+  const unique = [...new Set(codes.map((code) => String(code || '').trim()).filter(Boolean))];
+  const missing = unique.filter((code) => !OWNER_CACHE.has(code));
+  let cursor = 0;
+  async function worker() {
+    while (cursor < missing.length) {
+      const code = missing[cursor++];
+      try {
+        const url = `${FIREBASE_DATABASE_URL}/allLinks/${encodeURIComponent(code)}/users.json`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) continue;
+        OWNER_CACHE.set(code, emailsFromUsers(await res.json()));
+      } catch {
+        /* leave uncached so the next batch can retry */
+      }
     }
   }
+  const workers = Math.min(24, missing.length);
+  if (workers) await Promise.all(Array.from({ length: workers }, () => worker()));
+  const out = new Map();
+  for (const code of unique) out.set(code, OWNER_CACHE.get(code) || []);
   return out;
+}
+
+function rollupMails(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const owners = row.emails?.length ? row.emails : ['Mail not linked'];
+    const share = owners.length || 1;
+    for (const email of owners) {
+      if (!map.has(email)) map.set(email, { email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 });
+      const item = map.get(email);
+      item.pages += 1;
+      item.views += (Number(row.views) || 0) / share;
+      item.activeUsers += (Number(row.activeUsers) || 0) / share;
+      item.totalRevenue += (Number(row.totalRevenue) || 0) / share;
+    }
+  }
+  return [...map.values()];
 }
 
 app.get('/api/analytics/pages', async (req, res) => {
@@ -1137,18 +1177,12 @@ app.get('/api/analytics/pages', async (req, res) => {
       return res.status(400).json({ error: 'start_date cannot be after end_date' });
     }
 
-    const limit = Math.max(1, Math.min(5000, parseInt(req.query.limit || '2000', 10) || 2000));
+    const mode = req.query.mode === 'mails' ? 'mails' : 'table';
+    const limitCap = mode === 'mails' ? 500 : 100;
+    const limit = Math.max(1, Math.min(limitCap, parseInt(req.query.limit || (mode === 'mails' ? '400' : '25'), 10) || 25));
     const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
     const q = String(req.query.q || '').trim().slice(0, 120);
 
-    let emailsByCode = new Map();
-    let mailWarning = '';
-    try {
-      emailsByCode = await codeToEmails();
-    } catch (err) {
-      console.error('mail map', err);
-      mailWarning = err.message || 'Mail map nahi bana';
-    }
     const report = await runPagesReport(startDate, endDate, { limit, offset, q });
     const metricNames = report._metricNames || PAGE_METRICS;
     const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
@@ -1169,12 +1203,22 @@ app.get('/api/analytics/pages', async (req, res) => {
       };
     };
 
-    const rows = (report.rows || []).map((row) => {
-      const mapped = mapRow(row);
-      const owners = emailsByCode.get(pathCode(mapped.path)) || [];
-      mapped.emails = owners;
-      return mapped;
+    const mappedRows = (report.rows || []).map(mapRow);
+    let ownersByCode = new Map();
+    let mailWarning = '';
+    try {
+      ownersByCode = await lookupOwners(mappedRows.map((row) => pathCode(row.path)));
+    } catch (err) {
+      console.error('mail lookup', err);
+      mailWarning = err.message || 'Mail map nahi bana';
+    }
+    const rows = mappedRows.map((row) => {
+      row.emails = ownersByCode.get(pathCode(row.path)) || [];
+      return row;
     });
+    const rowCount = Number(report.rowCount || 0);
+    const nextOffset = offset + rows.length;
+    const done = !rows.length || nextOffset >= rowCount;
     const totalsRow = report.totals?.[0];
     const totals = totalsRow
       ? mapRow({ ...totalsRow, dimensionValues: [{ value: 'Total' }] })
@@ -1189,6 +1233,24 @@ app.get('/api/analytics/pages', async (req, res) => {
           totalRevenue: 0,
         };
     totals.path = 'Total';
+
+    if (mode === 'mails') {
+      return res.json({
+        startDate,
+        endDate,
+        q,
+        mode,
+        limit,
+        offset,
+        nextOffset,
+        done,
+        rowCount,
+        currency: 'INR',
+        totals,
+        mails: rollupMails(rows),
+        mailWarning,
+      });
+    }
 
     const topPaths = offset === 0 ? rows.slice(0, 5).map((row) => row.path) : [];
     const [dateRes] = await gaClient.runReport({

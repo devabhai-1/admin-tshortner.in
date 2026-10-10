@@ -121,10 +121,16 @@ export default function PagesDashboard() {
   const [search, setSearch] = useState('')
   const [mailQuery, setMailQuery] = useState('')
   const [mailSort, setMailSort] = useState('cpm')
+  const [page, setPage] = useState(0)
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [loaded, setLoaded] = useState(0)
+  const [mailRows, setMailRows] = useState([])
+  const [mailLoading, setMailLoading] = useState(false)
+  const [mailError, setMailError] = useState('')
+  const [mailLoaded, setMailLoaded] = useState(0)
+  const [mailTotal, setMailTotal] = useState(0)
+  const pageSize = 25
 
   useEffect(() => {
     const timer = setTimeout(() => setSearch(query.trim()), 350)
@@ -132,17 +138,59 @@ export default function PagesDashboard() {
   }, [query])
 
   useEffect(() => {
+    setPage(0)
+  }, [startDate, endDate, search])
+
+  useEffect(() => {
     const ctrl = new AbortController()
     let stop = false
-    async function loadAll() {
+    async function loadTable() {
       setLoading(true)
       setError('')
-      setLoaded(0)
-      setData(null)
-      const allRows = []
+      try {
+        const params = new URLSearchParams({
+          start_date: startDate,
+          end_date: endDate,
+          limit: String(pageSize),
+          offset: String(page * pageSize),
+          mode: 'table',
+        })
+        if (search) params.set('q', search)
+        const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(body.error || 'Pages report nahi aaya')
+        if (stop) return
+        setData((prev) => ({
+          ...body,
+          series: body.series?.length ? body.series : prev?.series,
+          seriesPaths: body.seriesPaths?.length ? body.seriesPaths : prev?.seriesPaths,
+        }))
+      } catch (err) {
+        if (err.name === 'AbortError' || stop) return
+        setError(err.message || 'Pages report nahi aaya')
+      } finally {
+        if (!stop) setLoading(false)
+      }
+    }
+    loadTable()
+    return () => {
+      stop = true
+      ctrl.abort()
+    }
+  }, [startDate, endDate, search, page])
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let stop = false
+    async function loadMails() {
+      setMailLoading(true)
+      setMailError('')
+      setMailRows([])
+      setMailLoaded(0)
+      setMailTotal(0)
+      const merged = new Map()
       let offset = 0
-      const limit = 2000
-      let last = null
+      const limit = 400
       try {
         while (!stop) {
           const params = new URLSearchParams({
@@ -150,29 +198,38 @@ export default function PagesDashboard() {
             end_date: endDate,
             limit: String(limit),
             offset: String(offset),
+            mode: 'mails',
           })
           if (search) params.set('q', search)
           const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
           const body = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(body.error || 'Pages report nahi aaya')
-          const batch = body.rows || []
-          allRows.push(...batch)
-          last = body
-          offset += batch.length
-          setLoaded(allRows.length)
-          setData({ ...body, rows: allRows.slice() })
+          if (!res.ok) throw new Error(body.error || 'Mail totals nahi aaye')
+          for (const mail of body.mails || []) {
+            if (!merged.has(mail.email)) {
+              merged.set(mail.email, { email: mail.email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 })
+            }
+            const item = merged.get(mail.email)
+            item.pages += Number(mail.pages) || 0
+            item.views += Number(mail.views) || 0
+            item.activeUsers += Number(mail.activeUsers) || 0
+            item.totalRevenue += Number(mail.totalRevenue) || 0
+          }
+          offset = Number(body.nextOffset ?? offset)
           const total = Number(body.rowCount || 0)
-          if (!batch.length || offset >= total) break
+          setMailLoaded(offset)
+          setMailTotal(total)
+          setMailRows(Array.from(merged.values()))
+          if (body.done || offset >= total || !(body.mails || []).length && offset === 0) break
+          if (!body.mails?.length) break
         }
       } catch (err) {
         if (err.name === 'AbortError' || stop) return
-        setError(err.message || 'Pages report nahi aaya')
-        if (last) setData({ ...last, rows: allRows.slice() })
+        setMailError(err.message || 'Mail totals nahi aaye')
       } finally {
-        if (!stop) setLoading(false)
+        if (!stop) setMailLoading(false)
       }
     }
-    loadAll()
+    loadMails()
     return () => {
       stop = true
       ctrl.abort()
@@ -184,20 +241,7 @@ export default function PagesDashboard() {
   const mailSearch = mailQuery.trim().toLowerCase()
   const mails = useMemo(() => {
     const MIN_VIEWS = 500
-    const map = new Map()
-    for (const row of data?.rows || []) {
-      const owners = row.emails?.length ? row.emails : ['Mail not linked']
-      const share = owners.length
-      for (const email of owners) {
-        if (!map.has(email)) map.set(email, { email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 })
-        const item = map.get(email)
-        item.pages += 1
-        item.views += (Number(row.views) || 0) / share
-        item.activeUsers += (Number(row.activeUsers) || 0) / share
-        item.totalRevenue += (Number(row.totalRevenue) || 0) / share
-      }
-    }
-    const list = Array.from(map.values()).filter((row) => {
+    const list = mailRows.filter((row) => {
       if (!mailSearch) return true
       return String(row.email || '').toLowerCase().includes(mailSearch)
     })
@@ -223,9 +267,10 @@ export default function PagesDashboard() {
       if (bEarn !== aEarn) return bEarn - aEarn
       return bViews - aViews
     })
-  }, [data, mailSearch, mailSort])
-  const rowCount = Number(data?.rowCount || 0)
-  const allLoaded = rowCount > 0 && loaded >= rowCount
+  }, [mailRows, mailSearch, mailSort])
+  const rowCount = Number(data?.rowCount || mailTotal || 0)
+  const pageCount = Math.max(1, Math.ceil(rowCount / pageSize))
+  const mailDone = mailTotal > 0 && mailLoaded >= mailTotal && !mailLoading
   const legend = useMemo(() => ['Total', ...(data?.seriesPaths || [])], [data])
 
   const applyRange = (start, end) => {
@@ -270,7 +315,9 @@ export default function PagesDashboard() {
         <button type="button" onClick={() => applyRange(isoDaysAgo(6), isoDaysAgo(0))}>Last 7 days</button>
         <button type="button" onClick={() => applyRange(isoDaysAgo(27), isoDaysAgo(0))}>Last 28 days</button>
         <span className="demo-count">
-          {loading ? `Rows ${fmtInt(loaded)} / ${fmtInt(rowCount || loaded)}` : `${fmtInt(rows.length)} / ${fmtInt(rowCount)} rows loaded`}
+          {mailLoading
+            ? `Mail totals ${fmtInt(mailLoaded)} / ${fmtInt(mailTotal || mailLoaded)} pages`
+            : `${fmtInt(rowCount)} pages`}
         </span>
       </div>
 
@@ -292,8 +339,12 @@ export default function PagesDashboard() {
       <section className="demo-card">
         <div className="demo-card__head">
           <h2>Mail wise views aur kamai</h2>
-          <span className="demo-note">{fmtInt(mails.length)} mails</span>
+          <span className="demo-note">
+            {mailLoading ? `Mails ban rahe hain · ${fmtInt(mailLoaded)} / ${fmtInt(mailTotal)}` : `${fmtInt(mails.length)} mails`}
+            {mailDone ? ' · complete' : ''}
+          </span>
         </div>
+        {mailError ? <p className="demo-error">{mailError}</p> : null}
         {data?.mailWarning ? <p className="demo-error">{data.mailWarning}</p> : null}
         <div className="demo-toolbar">
           <label>
@@ -337,7 +388,7 @@ export default function PagesDashboard() {
                 <tr className="demo-total">
                   <td />
                   <td>Total</td>
-                  <td>{fmtInt(rows.length)}</td>
+                  <td>{fmtInt(mailDone ? mailTotal : rowCount)}</td>
                   <td>{fmtInt(totals.views)}</td>
                   <td>100%</td>
                   <td>{fmtInt(totals.activeUsers)}</td>
@@ -383,7 +434,7 @@ export default function PagesDashboard() {
               onChange={(e) => setQuery(e.target.value)}
             />
           </label>
-          <span className="demo-note">{allLoaded ? 'Is date ki saari rows load ho gayi.' : 'Saari rows load ho rahi hain.'}</span>
+          <span className="demo-note">{loading ? 'Page load ho raha hai.' : `${fmtInt(rowCount)} pages`}</span>
         </div>
         <div className="demo-table-wrap">
           <table className="demo-table">
@@ -420,7 +471,7 @@ export default function PagesDashboard() {
               ) : null}
               {rows.map((row, index) => (
                 <tr key={row.path}>
-                  <td>{index + 1}</td>
+                  <td>{page * pageSize + index + 1}</td>
                   <td>{row.path}</td>
                   <td>{row.emails?.length ? row.emails.join(', ') : '—'}</td>
                   <td>{fmtInt(row.views)}<small>{fmtShare(row.views, totals?.views)}</small></td>
@@ -439,11 +490,17 @@ export default function PagesDashboard() {
             </tbody>
           </table>
         </div>
-        <p className="demo-count">
-          {fmtInt(rows.length)} rows dikh rahi hain
-          {rowCount ? ` / ${fmtInt(rowCount)} total` : ''}
-          {allLoaded ? ' · complete' : ''}
-        </p>
+        <div className="demo-pager">
+          <button type="button" disabled={page <= 0 || loading} onClick={() => setPage((n) => Math.max(0, n - 1))}>
+            Previous
+          </button>
+          <span className="demo-count">
+            {fmtInt(page * pageSize + (rows.length ? 1 : 0))}–{fmtInt(page * pageSize + rows.length)} of {fmtInt(rowCount)}
+          </span>
+          <button type="button" disabled={loading || page + 1 >= pageCount} onClick={() => setPage((n) => n + 1)}>
+            Next
+          </button>
+        </div>
       </section>
     </div>
   )
