@@ -330,7 +330,13 @@ export default function GaFirebaseDashboard() {
     const mapQ = refreshMap ? '&refresh_map=1' : ''
     const apiPath = `/api/analytics?start_date=${startDate}&end_date=${endDate}${modeQ}${mapQ}`
     const res = await apiFetch(apiPath)
-    const data = await res.json()
+    const text = await res.text()
+    let data = {}
+    try {
+      data = text ? JSON.parse(text) : {}
+    } catch {
+      throw new Error(text.slice(0, 180) || `Empty response (${res.status})`)
+    }
     if (!res.ok) {
       const msg = typeof data?.error === 'string' ? data.error : 'HTTP ' + res.status
       throw new Error(msg)

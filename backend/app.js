@@ -135,14 +135,17 @@ function normalizeId(val) {
   return val;
 }
 
+function extractLinkIdRaw(path) {
+  if (!path) return '';
+  let clean = String(path).trim().split('?')[0].replace(/^\/+|\/+$/g, '');
+  clean = clean.replace(/^pages\//i, '').replace(/^al\//i, '');
+  const parts = clean.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
 function extractLinkId(path) {
-  if (!path) return null;
-  path = path.trim().toLowerCase();
-  path = path.replace(/^\/+/, '').replace(/\/+$/, '');
-  path = path.split('?')[0];
-  path = path.replace('pages/', '').replace('al/', '');
-  const parts = path.split('/');
-  return parts[parts.length - 1];
+  const raw = extractLinkIdRaw(path);
+  return raw ? raw.toLowerCase() : null;
 }
 
 function parseIsoDate(s) {
@@ -360,6 +363,73 @@ async function runGa4Report(startDateStr, endDateStr) {
   };
 }
 
+async function ownersForBatch(gaRows) {
+  const rawByNorm = new Map();
+  for (const row of gaRows) {
+    const raw = extractLinkIdRaw(row.dimensionValues?.[1]?.value || '');
+    const norm = normalizeId(raw);
+    if (norm && !rawByNorm.has(norm)) rawByNorm.set(norm, raw);
+  }
+  const found = await lookupOwners([...rawByNorm.values()], {
+    deadlineMs: 4000,
+    concurrency: 36,
+    fetchMs: 1500,
+  });
+  const lidLookup = {};
+  for (const [norm, raw] of rawByNorm) {
+    const emails = found.get(raw) || [];
+    if (emails[0]) lidLookup[norm] = emails[0];
+  }
+  return lidLookup;
+}
+
+async function pullGaPages({ startS, endS, rawMode, pageSize = 250, maxMs = 35000, onBatch }) {
+  const started = Date.now();
+  let offset = 0;
+  let totalExpected = null;
+  let pages = 0;
+  let fetched = 0;
+  let outputCount = 0;
+  let lastError = '';
+  while (Date.now() - started < maxMs) {
+    let response;
+    try {
+      const result = await Promise.race([
+        gaClient.runReport({
+          property: `properties/${PROPERTY_ID}`,
+          dimensions: [{ name: 'date' }, { name: 'pagePath' }],
+          metrics: [{ name: 'screenPageViews' }],
+          dateRanges: [{ startDate: startS, endDate: endS }],
+          orderBys: [{ dimension: { dimensionName: 'date' }, desc: true }],
+          limit: pageSize,
+          offset,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 15000)),
+      ]);
+      response = result[0];
+    } catch (e) {
+      lastError = e.message || 'GA4 report failed';
+      break;
+    }
+    pages += 1;
+    if (totalExpected === null) totalExpected = Number(response.rowCount || 0);
+    const batch = response.rows || [];
+    if (!batch.length) break;
+    fetched += batch.length;
+    offset += batch.length;
+    const lidLookup = await ownersForBatch(batch);
+    const outBatch = rowsToOutput(batch, lidLookup, rawMode);
+    outputCount += outBatch.length;
+    if (onBatch) await onBatch(outBatch, { totalExpected, fetched, pages, outputCount });
+    if ((totalExpected && fetched >= totalExpected) || batch.length < pageSize) break;
+  }
+  const complete = !totalExpected || fetched >= totalExpected;
+  if (!complete && !lastError) {
+    lastError = `Time limit: ${fetched} / ${totalExpected} rows loaded. Latest dates pehle aate hain.`;
+  }
+  return { totalExpected: totalExpected || fetched, fetched, pages, outputCount, lastError, complete };
+}
+
 function rowsToOutput(gaRows, lidLookup, rawMode) {
     const out = [];
     for (const r of gaRows) {
@@ -559,25 +629,6 @@ app.get('/api/analytics', async (req, res) => {
             return res.status(500).json({ error: "GA4 client not initialized" });
         }
 
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.flushHeaders();
-
-        let isStreamActive = true;
-        req.on('close', () => { isStreamActive = false; });
-        res.on('error', (err) => { console.error("Stream error:", err); isStreamActive = false; });
-
-        function emit(event, data) {
-            if (!isStreamActive) return;
-            try {
-                res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-            } catch(e) {
-                isStreamActive = false;
-            }
-        }
-
-        const forceFb = req.query.refresh_map === "1";
         const rawMode = req.query.mode === "raw";
         const today = new Date();
         let endDate = new Date(today);
@@ -632,39 +683,17 @@ app.get('/api/analytics', async (req, res) => {
 
         const startS = formatDate(startDate);
         const endS = formatDate(endDate);
-
-        const fbMap = await firebaseMappingCached(forceFb);
-        const { allRows, totalExpected, pages, complete, error } = await runGa4Report(startS, endS);
-        const lidLookup = linkIdToEmailLookup(fbMap);
-        
         const output = [];
-        for (const r of allRows) {
-            const rawDate = r.dimensionValues[0].value;
-            const pagePath = r.dimensionValues[1].value;
-            const views = parseInt(r.metricValues[0].value, 10);
-
-            const readableDate = `${rawDate.substring(0, 4)}-${rawDate.substring(4, 6)}-${rawDate.substring(6)}`;
-            const linkId = normalizeId(extractLinkId(pagePath));
-
-            if (rawMode) {
-                const matchedEmail = linkId ? lidLookup[linkId] : null;
-                if (!linkId && !pagePath) continue;
-                output.push({
-                    date: readableDate,
-                    email: matchedEmail || "",
-                    pagePath: pagePath || "",
-                    linkId: linkId || "",
-                    views: views
-                });
-                continue;
-            }
-
-            if (!linkId) continue;
-            const matchedEmail = lidLookup[linkId];
-            if (matchedEmail) {
-                output.push({ date: readableDate, email: matchedEmail, views: views });
-            }
-        }
+        const pulled = await pullGaPages({
+            startS,
+            endS,
+            rawMode,
+            pageSize: 200,
+            maxMs: 25000,
+            onBatch: async (batch) => {
+                output.push(...batch);
+            },
+        });
 
         return res.json({
             rows: output,
@@ -672,11 +701,11 @@ app.get('/api/analytics', async (req, res) => {
                 start_date: startS,
                 end_date: endS,
                 unlimited_days: unlimitedDays,
-                ga4_rows_expected: totalExpected,
-                ga4_rows_fetched: allRows.length,
-                ga4_pages: pages,
-                ga4_complete: complete,
-                ga4_error: error,
+                ga4_rows_expected: pulled.totalExpected,
+                ga4_rows_fetched: pulled.fetched,
+                ga4_pages: pulled.pages,
+                ga4_complete: pulled.complete,
+                ga4_error: pulled.lastError,
                 output_rows: output.length,
                 raw_mode: rawMode
             }
@@ -694,7 +723,6 @@ app.get('/api/analytics/stream', async (req, res) => {
             return res.status(500).json({ error: "GA4 client not initialized" });
         }
 
-        const forceFb = req.query.refresh_map === "1";
         const rawMode = req.query.mode === "raw";
         const today = new Date();
         let endDate = new Date(today);
@@ -768,100 +796,46 @@ app.get('/api/analytics/stream', async (req, res) => {
             page_size: Math.max(1, Math.min(GA4_PAGE_SIZE, 250000))
         });
 
-        emit("progress", { phase: "mapping", message: "Loading Firebase link map…" });
-        const heartbeat = setInterval(() => {
-            emit("progress", { phase: "mapping", message: "Still loading map…" });
-        }, 4000);
-        let fbMap = {};
-        try {
-            fbMap = await firebaseMappingCached(forceFb);
-        } finally {
-            clearInterval(heartbeat);
-        }
-        const lidLookup = linkIdToEmailLookup(fbMap);
-        emit("progress", {
-            phase: "ga4",
-            message: "Fetching GA4…",
-            map_emails: Object.keys(fbMap || {}).length
+        emit("progress", { phase: "ga4", message: "Fetching GA4…" });
+
+        const pulled = await pullGaPages({
+            startS,
+            endS,
+            rawMode,
+            pageSize: 250,
+            maxMs: 40000,
+            onBatch: async (outBatch, info) => {
+                if (!isStreamActive || !outBatch.length) return;
+                emit("rows", {
+                    rows: outBatch,
+                    meta: {
+                        ga4_rows_expected: info.totalExpected,
+                        ga4_rows_fetched: info.fetched,
+                        ga4_pages: info.pages,
+                        output_rows: info.outputCount
+                    }
+                });
+                emit("progress", {
+                    ga4_rows_expected: info.totalExpected,
+                    ga4_rows_fetched: info.fetched,
+                    ga4_pages: info.pages,
+                    output_rows: info.outputCount
+                });
+            },
         });
 
-        let fetchedGaRowsCount = 0;
-        let outputRowsCount = 0;
-        let totalExpected = null;
-        let pages = 0;
-        let lastError = "";
-        let offset = 0;
-        const pageSize = Math.max(1, Math.min(GA4_PAGE_SIZE, 250000));
-
-        while (true) {
-            if (!isStreamActive) break;
-            try {
-                const [response] = await gaClient.runReport({
-                    property: `properties/${PROPERTY_ID}`,
-                    dimensions: [{ name: 'date' }, { name: 'pagePath' }],
-                    metrics: [{ name: 'screenPageViews' }],
-                    dateRanges: [{ startDate: startS, endDate: endS }],
-                    limit: pageSize,
-                    offset: offset,
-                });
-
-                if (!isStreamActive) break;
-
-                pages++;
-                if (totalExpected === null) {
-                    totalExpected = response.rowCount ? parseInt(response.rowCount, 10) : 0;
-                }
-
-                const batch = response.rows || [];
-                if (batch.length === 0) break;
-
-                fetchedGaRowsCount += batch.length;
-                offset += batch.length;
-
-                const outBatch = rowsToOutput(batch, lidLookup, rawMode);
-                if (outBatch.length > 0) {
-                    outputRowsCount += outBatch.length;
-                    emit("rows", {
-                        rows: outBatch,
-                        meta: {
-                            ga4_rows_expected: totalExpected,
-                            ga4_rows_fetched: fetchedGaRowsCount,
-                            ga4_pages: pages,
-                            output_rows: outputRowsCount
-                        }
-                    });
-                }
-
-                emit("progress", {
-                    ga4_rows_expected: totalExpected,
-                    ga4_rows_fetched: fetchedGaRowsCount,
-                    ga4_pages: pages,
-                    output_rows: outputRowsCount
-                });
-
-                if (totalExpected && fetchedGaRowsCount >= totalExpected) break;
-                if (batch.length < pageSize) break;
-
-            } catch (e) {
-                lastError = e.message;
-                emit("error", { message: lastError });
-                break;
-            }
-        }
-
-        const gaComplete = (totalExpected === null) || (fetchedGaRowsCount >= totalExpected);
         emit("done", {
-            rows: [], // Returning empty rows at the end to prevent memory spikes since they were already streamed
+            rows: [],
             meta: {
                 start_date: startS,
                 end_date: endS,
                 unlimited_days: unlimitedDays,
-                ga4_rows_expected: totalExpected || fetchedGaRowsCount,
-                ga4_rows_fetched: fetchedGaRowsCount,
-                ga4_pages: pages,
-                ga4_complete: gaComplete,
-                ga4_error: lastError,
-                output_rows: outputRowsCount,
+                ga4_rows_expected: pulled.totalExpected,
+                ga4_rows_fetched: pulled.fetched,
+                ga4_pages: pulled.pages,
+                ga4_complete: pulled.complete,
+                ga4_error: pulled.lastError,
+                output_rows: pulled.outputCount,
                 raw_mode: rawMode
             }
         });
@@ -870,6 +844,10 @@ app.get('/api/analytics/stream', async (req, res) => {
 
     } catch (e) {
         console.error(e);
+        if (res.headersSent) {
+            try { res.end(); } catch { /* already closed */ }
+            return;
+        }
         res.status(500).json({ error: e.message });
     }
 });
@@ -1123,17 +1101,19 @@ function emailsFromUsers(users) {
 
 const OWNER_CACHE = new Map();
 
-async function lookupOwners(codes) {
+async function lookupOwners(codes, options = {}) {
   const unique = [...new Set(codes.map((code) => String(code || '').trim()).filter(Boolean))];
   const missing = unique.filter((code) => !OWNER_CACHE.has(code));
-  const deadline = Date.now() + 5000;
+  const deadlineMs = options.deadlineMs || 5000;
+  const fetchMs = options.fetchMs || 2000;
+  const deadline = Date.now() + deadlineMs;
   let cursor = 0;
   async function worker() {
     while (cursor < missing.length && Date.now() < deadline) {
       const code = missing[cursor++];
       try {
         const url = `${FIREBASE_DATABASE_URL}/allLinks/${encodeURIComponent(code)}/users.json`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+        const res = await fetch(url, { signal: AbortSignal.timeout(fetchMs) });
         if (!res.ok) continue;
         OWNER_CACHE.set(code, emailsFromUsers(await res.json()));
       } catch {
@@ -1141,11 +1121,11 @@ async function lookupOwners(codes) {
       }
     }
   }
-  const workers = Math.min(20, missing.length);
+  const workers = Math.min(options.concurrency || 20, missing.length);
   if (workers) {
     await Promise.race([
       Promise.all(Array.from({ length: workers }, () => worker())),
-      new Promise((resolve) => setTimeout(resolve, 5500)),
+      new Promise((resolve) => setTimeout(resolve, deadlineMs + 400)),
     ]);
   }
   const out = new Map();
