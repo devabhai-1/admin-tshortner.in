@@ -1084,7 +1084,10 @@ async function runPagesReport(startDate, endDate, { limit, offset, q, metrics })
     };
   }
   try {
-    const [response] = await gaClient.runReport(request);
+    const response = await Promise.race([
+      gaClient.runReport(request).then((result) => result[0]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 18000)),
+    ]);
     response._metricNames = names;
     return response;
   } catch (err) {
@@ -1123,13 +1126,14 @@ const OWNER_CACHE = new Map();
 async function lookupOwners(codes) {
   const unique = [...new Set(codes.map((code) => String(code || '').trim()).filter(Boolean))];
   const missing = unique.filter((code) => !OWNER_CACHE.has(code));
+  const deadline = Date.now() + 5000;
   let cursor = 0;
   async function worker() {
-    while (cursor < missing.length) {
+    while (cursor < missing.length && Date.now() < deadline) {
       const code = missing[cursor++];
       try {
         const url = `${FIREBASE_DATABASE_URL}/allLinks/${encodeURIComponent(code)}/users.json`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
         if (!res.ok) continue;
         OWNER_CACHE.set(code, emailsFromUsers(await res.json()));
       } catch {
@@ -1137,8 +1141,13 @@ async function lookupOwners(codes) {
       }
     }
   }
-  const workers = Math.min(24, missing.length);
-  if (workers) await Promise.all(Array.from({ length: workers }, () => worker()));
+  const workers = Math.min(20, missing.length);
+  if (workers) {
+    await Promise.race([
+      Promise.all(Array.from({ length: workers }, () => worker())),
+      new Promise((resolve) => setTimeout(resolve, 5500)),
+    ]);
+  }
   const out = new Map();
   for (const code of unique) out.set(code, OWNER_CACHE.get(code) || []);
   return out;
@@ -1177,13 +1186,47 @@ app.get('/api/analytics/pages', async (req, res) => {
       return res.status(400).json({ error: 'start_date cannot be after end_date' });
     }
 
-    const mode = req.query.mode === 'mails' ? 'mails' : 'table';
-    const limitCap = mode === 'mails' ? 500 : 100;
-    const limit = Math.max(1, Math.min(limitCap, parseInt(req.query.limit || (mode === 'mails' ? '400' : '25'), 10) || 25));
-    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+    const mode = req.query.mode === 'mails' ? 'mails' : req.query.mode === 'series' ? 'series' : 'table';
     const q = String(req.query.q || '').trim().slice(0, 120);
 
-    const report = await runPagesReport(startDate, endDate, { limit, offset, q });
+    if (mode === 'series') {
+      const [dateRes] = await Promise.race([
+        gaClient.runReport({
+          property: `properties/${PROPERTY_ID}`,
+          dimensions: [{ name: 'date' }],
+          metrics: [{ name: 'screenPageViews' }, { name: 'totalRevenue' }],
+          dateRanges: [{ startDate, endDate }],
+          orderBys: [{ dimension: { dimensionName: 'date' } }],
+          limit: 400,
+          dimensionFilter: q
+            ? {
+                filter: {
+                  fieldName: 'unifiedPagePathScreen',
+                  stringFilter: { matchType: 'CONTAINS', value: q, caseSensitive: false },
+                },
+              }
+            : undefined,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 18000)),
+      ]);
+      const series = (dateRes.rows || []).map((row) => ({
+        date: gaDateToIso(row.dimensionValues?.[0]?.value),
+        Total: Number(row.metricValues?.[0]?.value || 0),
+        revenue: Number(row.metricValues?.[1]?.value || 0),
+      }));
+      return res.json({ startDate, endDate, q, mode, series, seriesPaths: [] });
+    }
+
+    const limitCap = mode === 'mails' ? 40 : 25;
+    const limit = Math.max(1, Math.min(limitCap, parseInt(req.query.limit || String(limitCap), 10) || limitCap));
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+
+    const report = await runPagesReport(startDate, endDate, {
+      limit,
+      offset,
+      q,
+      metrics: mode === 'mails' ? ['screenPageViews', 'activeUsers', 'totalRevenue'] : undefined,
+    });
     const metricNames = report._metricNames || PAGE_METRICS;
     const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
 
@@ -1252,71 +1295,21 @@ app.get('/api/analytics/pages', async (req, res) => {
       });
     }
 
-    const topPaths = offset === 0 ? rows.slice(0, 5).map((row) => row.path) : [];
-    const [dateRes] = await gaClient.runReport({
-      property: `properties/${PROPERTY_ID}`,
-      dimensions: [{ name: 'date' }],
-      metrics: [{ name: 'screenPageViews' }, { name: 'totalRevenue' }],
-      dateRanges: [{ startDate, endDate }],
-      orderBys: [{ dimension: { dimensionName: 'date' } }],
-      limit: 400,
-      dimensionFilter: q
-        ? {
-            filter: {
-              fieldName: 'unifiedPagePathScreen',
-              stringFilter: { matchType: 'CONTAINS', value: q, caseSensitive: false },
-            },
-          }
-        : undefined,
-    });
-
-    const seriesMap = new Map();
-    for (const row of dateRes.rows || []) {
-      const date = gaDateToIso(row.dimensionValues?.[0]?.value);
-      seriesMap.set(date, {
-        date,
-        Total: Number(row.metricValues?.[0]?.value || 0),
-        revenue: Number(row.metricValues?.[1]?.value || 0),
-      });
-    }
-
-    if (topPaths.length) {
-      const [pathRes] = await gaClient.runReport({
-        property: `properties/${PROPERTY_ID}`,
-        dimensions: [{ name: 'date' }, { name: 'unifiedPagePathScreen' }],
-        metrics: [{ name: 'screenPageViews' }],
-        dateRanges: [{ startDate, endDate }],
-        dimensionFilter: {
-          filter: {
-            fieldName: 'unifiedPagePathScreen',
-            inListFilter: { values: topPaths },
-          },
-        },
-        orderBys: [{ dimension: { dimensionName: 'date' } }],
-        limit: 10000,
-      });
-      for (const row of pathRes.rows || []) {
-        const date = gaDateToIso(row.dimensionValues?.[0]?.value);
-        const path = row.dimensionValues?.[1]?.value || '(not set)';
-        if (!seriesMap.has(date)) seriesMap.set(date, { date, Total: 0, revenue: 0 });
-        seriesMap.get(date)[path] = Number(row.metricValues?.[0]?.value || 0);
-      }
-    }
-
     return res.json({
       startDate,
       endDate,
       q,
+      mode,
       limit,
       offset,
-      rowCount: Number(report.rowCount || 0),
+      rowCount,
       currency: 'INR',
       totals,
       rows,
       mails: [],
       mailWarning,
-      series: Array.from(seriesMap.values()).sort((a, b) => a.date.localeCompare(b.date)),
-      seriesPaths: topPaths,
+      series: [],
+      seriesPaths: [],
     });
   } catch (e) {
     console.error(e);

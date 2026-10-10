@@ -162,8 +162,8 @@ export default function PagesDashboard() {
         if (stop) return
         setData((prev) => ({
           ...body,
-          series: body.series?.length ? body.series : prev?.series,
-          seriesPaths: body.seriesPaths?.length ? body.seriesPaths : prev?.seriesPaths,
+          series: prev?.series || [],
+          seriesPaths: prev?.seriesPaths || [],
         }))
       } catch (err) {
         if (err.name === 'AbortError' || stop) return
@@ -182,6 +182,36 @@ export default function PagesDashboard() {
   useEffect(() => {
     const ctrl = new AbortController()
     let stop = false
+    async function loadSeries() {
+      try {
+        const params = new URLSearchParams({
+          start_date: startDate,
+          end_date: endDate,
+          mode: 'series',
+        })
+        if (search) params.set('q', search)
+        const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok || stop) return
+        setData((prev) => ({
+          ...(prev || {}),
+          series: body.series || [],
+          seriesPaths: body.seriesPaths || [],
+        }))
+      } catch (err) {
+        if (err.name === 'AbortError' || stop) return
+      }
+    }
+    loadSeries()
+    return () => {
+      stop = true
+      ctrl.abort()
+    }
+  }, [startDate, endDate, search])
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let stop = false
     async function loadMails() {
       setMailLoading(true)
       setMailError('')
@@ -190,7 +220,7 @@ export default function PagesDashboard() {
       setMailTotal(0)
       const merged = new Map()
       let offset = 0
-      const limit = 400
+      const limit = 40
       try {
         while (!stop) {
           const params = new URLSearchParams({
