@@ -192,15 +192,17 @@
   text-align: left;
 }
 
-.demo-table tbody tr {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 42px;
-}
+.demo-table th {
   color: #9aa0a6;
   font-weight: 500;
   position: sticky;
   top: 0;
   background: #202124;
+}
+
+.demo-table tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
 }
 
 .demo-table small {
