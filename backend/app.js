@@ -140,7 +140,9 @@ function extractLinkIdRaw(path) {
   let clean = String(path).trim().split('?')[0].replace(/^\/+|\/+$/g, '');
   clean = clean.replace(/^pages\//i, '').replace(/^al\//i, '');
   const parts = clean.split('/').filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : '';
+  const last = parts.length ? parts[parts.length - 1] : '';
+  const id = last.match(/[A-Za-z0-9_-]{6,}/);
+  return id ? id[0] : last;
 }
 
 function extractLinkId(path) {
@@ -383,6 +385,39 @@ async function ownersForBatch(gaRows) {
   return lidLookup;
 }
 
+function isoDaysBetween(startS, endS) {
+  const days = [];
+  let cur = startS;
+  while (cur && cur <= endS && days.length < 8) {
+    days.push(cur);
+    const [y, m, d] = cur.split('-').map(Number);
+    cur = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  }
+  return days;
+}
+
+async function loadRealtimeEmails(startS, endS) {
+  const map = new Map();
+  for (const day of isoDaysBetween(startS, endS)) {
+    try {
+      const res = await fetch(`${FIREBASE_DATABASE_URL}/realtimeTraffic/days/${day}/links.json`, {
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) continue;
+      const links = await res.json();
+      if (!links || typeof links !== 'object') continue;
+      for (const [code, row] of Object.entries(links)) {
+        const email = row && typeof row.email === 'string' ? row.email.trim() : '';
+        if (!email.includes('@')) continue;
+        map.set(String(code).toLowerCase(), email);
+      }
+    } catch (err) {
+      console.error('realtime emails', day, err.message);
+    }
+  }
+  return map;
+}
+
 async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50000, onBatch }) {
   const started = Date.now();
   let offset = 0;
@@ -432,28 +467,35 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
     lastError = `Incomplete: ${fetched} / ${totalExpected} pages loaded`;
   }
 
-  const ordered = [];
-  const seen = new Set();
+  const realtimeEmails = await loadRealtimeEmails(startS, endS);
+  const viewByCode = new Map();
   for (const row of gaRows) {
     const raw = extractLinkIdRaw(row.dimensionValues?.[1]?.value || '');
-    if (!raw || seen.has(raw)) continue;
-    seen.add(raw);
-    ordered.push(raw);
-  }
-  const toFetch = ordered.filter((raw) => !OWNER_CACHE.has(raw)).slice(0, 2500);
-  const remain = maxMs - (Date.now() - started);
-  if (toFetch.length && remain > 2500) {
-    await lookupOwners(toFetch, {
-      deadlineMs: Math.min(remain - 1000, 12000),
-      concurrency: 48,
-      fetchMs: 1200,
-    });
+    if (!raw) continue;
+    const views = Number(row.metricValues?.[0]?.value || 0);
+    viewByCode.set(raw, (viewByCode.get(raw) || 0) + views);
   }
   const lidLookup = {};
-  for (const raw of ordered) {
-    const emails = OWNER_CACHE.get(raw) || [];
+  for (const raw of viewByCode.keys()) {
     const norm = normalizeId(raw);
-    if (norm && emails[0]) lidLookup[norm] = emails[0];
+    const email = norm ? realtimeEmails.get(norm) : '';
+    if (norm && email) lidLookup[norm] = email;
+  }
+  const missing = [...viewByCode.keys()]
+    .filter((raw) => !lidLookup[normalizeId(raw)])
+    .sort((a, b) => viewByCode.get(b) - viewByCode.get(a));
+  const remain = maxMs - (Date.now() - started);
+  if (missing.length && remain > 3000) {
+    await lookupOwners(missing, {
+      deadlineMs: Math.min(remain - 1500, 40000),
+      concurrency: 40,
+      fetchMs: 4000,
+    });
+    for (const raw of missing) {
+      const emails = OWNER_CACHE.get(raw) || [];
+      const norm = normalizeId(raw);
+      if (norm && emails[0]) lidLookup[norm] = emails[0];
+    }
   }
 
   const chunk = 2000;
