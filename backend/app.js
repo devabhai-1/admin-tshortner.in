@@ -383,14 +383,16 @@ async function ownersForBatch(gaRows) {
   return lidLookup;
 }
 
-async function pullGaPages({ startS, endS, rawMode, pageSize = 250, maxMs = 35000, onBatch }) {
+async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50000, onBatch }) {
   const started = Date.now();
   let offset = 0;
   let totalExpected = null;
   let pages = 0;
   let fetched = 0;
   let outputCount = 0;
+  let viewTotal = 0;
   let lastError = '';
+  const gaRows = [];
   while (Date.now() - started < maxMs) {
     let response;
     try {
@@ -400,11 +402,12 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 250, maxMs = 3500
           dimensions: [{ name: 'date' }, { name: 'pagePath' }],
           metrics: [{ name: 'screenPageViews' }],
           dateRanges: [{ startDate: startS, endDate: endS }],
-          orderBys: [{ dimension: { dimensionName: 'date' }, desc: true }],
+          orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
           limit: pageSize,
           offset,
+          metricAggregations: ['TOTAL'],
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 15000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 20000)),
       ]);
       response = result[0];
     } catch (e) {
@@ -412,22 +415,56 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 250, maxMs = 3500
       break;
     }
     pages += 1;
-    if (totalExpected === null) totalExpected = Number(response.rowCount || 0);
+    if (totalExpected === null) {
+      totalExpected = Number(response.rowCount || 0);
+      const totalMetric = response.totals?.[0]?.metricValues?.[0]?.value;
+      if (totalMetric != null) viewTotal = Number(totalMetric) || 0;
+    }
     const batch = response.rows || [];
     if (!batch.length) break;
+    gaRows.push(...batch);
     fetched += batch.length;
     offset += batch.length;
-    const lidLookup = await ownersForBatch(batch);
-    const outBatch = rowsToOutput(batch, lidLookup, rawMode);
-    outputCount += outBatch.length;
-    if (onBatch) await onBatch(outBatch, { totalExpected, fetched, pages, outputCount });
     if ((totalExpected && fetched >= totalExpected) || batch.length < pageSize) break;
   }
   const complete = !totalExpected || fetched >= totalExpected;
   if (!complete && !lastError) {
-    lastError = `Time limit: ${fetched} / ${totalExpected} rows loaded. Latest dates pehle aate hain.`;
+    lastError = `Incomplete: ${fetched} / ${totalExpected} pages loaded`;
   }
-  return { totalExpected: totalExpected || fetched, fetched, pages, outputCount, lastError, complete };
+
+  const ordered = [];
+  const seen = new Set();
+  for (const row of gaRows) {
+    const raw = extractLinkIdRaw(row.dimensionValues?.[1]?.value || '');
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    ordered.push(raw);
+  }
+  const toFetch = ordered.filter((raw) => !OWNER_CACHE.has(raw)).slice(0, 2500);
+  const remain = maxMs - (Date.now() - started);
+  if (toFetch.length && remain > 2500) {
+    await lookupOwners(toFetch, {
+      deadlineMs: Math.min(remain - 1000, 12000),
+      concurrency: 48,
+      fetchMs: 1200,
+    });
+  }
+  const lidLookup = {};
+  for (const raw of ordered) {
+    const emails = OWNER_CACHE.get(raw) || [];
+    const norm = normalizeId(raw);
+    if (norm && emails[0]) lidLookup[norm] = emails[0];
+  }
+
+  const chunk = 2000;
+  for (let i = 0; i < gaRows.length; i += chunk) {
+    const outBatch = rowsToOutput(gaRows.slice(i, i + chunk), lidLookup, rawMode);
+    outputCount += outBatch.length;
+    if (onBatch) {
+      await onBatch(outBatch, { totalExpected, fetched, pages, outputCount, viewTotal });
+    }
+  }
+  return { totalExpected: totalExpected || fetched, fetched, pages, outputCount, viewTotal, lastError, complete };
 }
 
 function rowsToOutput(gaRows, lidLookup, rawMode) {
@@ -453,12 +490,11 @@ function rowsToOutput(gaRows, lidLookup, rawMode) {
             continue;
         }
 
-        if (!linkId) continue;
-        const matchedEmail = lidLookup[linkId];
+        const matchedEmail = linkId ? lidLookup[linkId] : '';
         out.push({
             date: readableDate,
-            email: matchedEmail || "",
-            linkId: linkId,
+            email: matchedEmail || 'Mail not linked',
+            linkId: linkId || '',
             pagePath: pagePath,
             views: views,
             matched: !!matchedEmail
@@ -688,8 +724,8 @@ app.get('/api/analytics', async (req, res) => {
             startS,
             endS,
             rawMode,
-            pageSize: 200,
-            maxMs: 25000,
+            pageSize: 10000,
+            maxMs: 50000,
             onBatch: async (batch) => {
                 output.push(...batch);
             },
@@ -706,6 +742,7 @@ app.get('/api/analytics', async (req, res) => {
                 ga4_pages: pulled.pages,
                 ga4_complete: pulled.complete,
                 ga4_error: pulled.lastError,
+                ga4_views: pulled.viewTotal,
                 output_rows: output.length,
                 raw_mode: rawMode
             }
@@ -802,8 +839,8 @@ app.get('/api/analytics/stream', async (req, res) => {
             startS,
             endS,
             rawMode,
-            pageSize: 250,
-            maxMs: 40000,
+            pageSize: 10000,
+            maxMs: 52000,
             onBatch: async (outBatch, info) => {
                 if (!isStreamActive || !outBatch.length) return;
                 emit("rows", {
@@ -812,6 +849,7 @@ app.get('/api/analytics/stream', async (req, res) => {
                         ga4_rows_expected: info.totalExpected,
                         ga4_rows_fetched: info.fetched,
                         ga4_pages: info.pages,
+                        ga4_views: info.viewTotal,
                         output_rows: info.outputCount
                     }
                 });
@@ -819,6 +857,7 @@ app.get('/api/analytics/stream', async (req, res) => {
                     ga4_rows_expected: info.totalExpected,
                     ga4_rows_fetched: info.fetched,
                     ga4_pages: info.pages,
+                    ga4_views: info.viewTotal,
                     output_rows: info.outputCount
                 });
             },
@@ -835,6 +874,7 @@ app.get('/api/analytics/stream', async (req, res) => {
                 ga4_pages: pulled.pages,
                 ga4_complete: pulled.complete,
                 ga4_error: pulled.lastError,
+                ga4_views: pulled.viewTotal,
                 output_rows: pulled.outputCount,
                 raw_mode: rawMode
             }

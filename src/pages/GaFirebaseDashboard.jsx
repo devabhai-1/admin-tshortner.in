@@ -351,6 +351,7 @@ export default function GaFirebaseDashboard() {
       const cacheKey = gaOnly ? GA_ANALYTICS_SESSION_RAW : GA_ANALYTICS_SESSION_KEY
       const startDate = isoDateDaysAgo(GA_INITIAL_DAYS - 1)
       const endDate = isoDateDaysAgo(0)
+      const days = Array.from({ length: GA_INITIAL_DAYS }, (_, i) => isoDateDaysAgo(GA_INITIAL_DAYS - 1 - i))
 
       try {
         if (hadCachedUi) {
@@ -361,27 +362,36 @@ export default function GaFirebaseDashboard() {
         }
         setLoadingDate(`${startDate}→${endDate}`)
         const seenStart = performance.now()
-        const { rows: incoming, meta } = await streamGaRange(startDate, endDate, {
-          gaOnly,
-          refreshMap: false,
-          onProgress: (p) => {
-            const exp = p?.ga4_rows_expected
-            const got = p?.ga4_rows_fetched
-            const out = p?.output_rows
-            if (got != null) {
-              setGaMsg({
-                text:
-                  exp != null && exp > 0
-                    ? `⟳ Loading… GA4 ${got.toLocaleString('en-IN')} / ${exp.toLocaleString('en-IN')} · output ${String(out ?? 0)}`
-                    : `⟳ Loading… GA4 ${got.toLocaleString('en-IN')} · output ${String(out ?? 0)}`,
-                kind: 'neutral',
-              })
-            }
-          },
-          onRows: (batch) => {
-            setAnalyticsRows((prev) => mergeGaRows(prev, batch))
-          },
-        })
+        let incoming = []
+        let meta = null
+        const incomplete = []
+        for (const day of days) {
+          setGaMsg({ text: `⟳ ${day} ki saari views load ho rahi hain…`, kind: 'neutral' })
+          const part = await streamGaRange(day, day, {
+            gaOnly,
+            refreshMap: false,
+            onProgress: (p) => {
+              const exp = p?.ga4_rows_expected
+              const got = p?.ga4_rows_fetched
+              const views = p?.ga4_views
+              if (got != null) {
+                setGaMsg({
+                  text:
+                    exp != null && exp > 0
+                      ? `⟳ ${day} · ${got.toLocaleString('en-IN')} / ${exp.toLocaleString('en-IN')} pages${views ? ` · ${Number(views).toLocaleString('en-IN')} views` : ''}`
+                      : `⟳ ${day} · ${got.toLocaleString('en-IN')} pages`,
+                  kind: 'neutral',
+                })
+              }
+            },
+            onRows: (batch) => {
+              setAnalyticsRows((prev) => mergeGaRows(prev, batch))
+            },
+          })
+          incoming = mergeGaRows(incoming, part.rows || [])
+          meta = part.meta || meta
+          if (part.meta && part.meta.ga4_complete === false) incomplete.push(day)
+        }
         setAnalyticsRows((prev) => replaceRowsInRange(prev, incoming, startDate, endDate))
 
         try {
@@ -395,9 +405,9 @@ export default function GaFirebaseDashboard() {
         setFbDate((d) => d || todayIso)
         setSelectedGaDate((cur) => cur || todayIso)
 
-        const fetched = meta?.ga4_rows_fetched
-        const errHint = meta?.ga4_error ? ` · ${String(meta.ga4_error).slice(0, 120)}` : ''
-        const metaBit = fetched != null ? ` · ${fetched.toLocaleString('en-IN')} rows${errHint}` : ''
+        const viewSum = incoming.reduce((sum, row) => sum + safeNum(row.views), 0)
+        const errHint = incomplete.length ? ` · incomplete: ${incomplete.join(', ')}` : ''
+        const metaBit = ` · ${viewSum.toLocaleString('en-IN')} views${errHint}`
         const took = ((performance.now() - seenStart) / 1000).toFixed(1)
         setGaMsg({
           text: incoming.length
@@ -410,16 +420,22 @@ export default function GaFirebaseDashboard() {
         // Stream fail → normal JSON API fallback so UI still gets data
         try {
           setGaMsg({ text: '⟳ Stream fail — JSON API se load…', kind: 'neutral' })
-          const { rows: incoming, meta } = await fetchGaRange(startDate, endDate, { gaOnly })
+          let incoming = []
+          for (const day of days) {
+            const part = await fetchGaRange(day, day, { gaOnly })
+            incoming = mergeGaRows(incoming, part.rows || [])
+            setAnalyticsRows((prev) => mergeGaRows(prev, part.rows || []))
+          }
           setAnalyticsRows((prev) => replaceRowsInRange(prev, incoming, startDate, endDate))
           try {
             if (incoming.length) sessionStorage.setItem(cacheKey, JSON.stringify(incoming))
           } catch {
             /* ignore */
           }
+          const viewSum = incoming.reduce((sum, row) => sum + safeNum(row.views), 0)
           setGaMsg({
             text: incoming.length
-              ? `✅ Loaded via fallback API (${incoming.length.toLocaleString('en-IN')} rows)`
+              ? `✅ Loaded via fallback API (${viewSum.toLocaleString('en-IN')} views)`
               : '⚠ Fallback API me bhi koi data nahi',
             kind: incoming.length ? 'ok' : 'err',
           })
@@ -979,7 +995,10 @@ export default function GaFirebaseDashboard() {
                 </select>
               </div>
               <div className="stat-chip">
-                Showing: <strong>{gaOnlyDisplayRows.length}</strong> rows
+                Showing: <strong>{gaOnlyDisplayRows.length}</strong> rows · Views:{' '}
+                <strong>
+                  {gaOnlyDisplayRows.reduce((sum, row) => sum + safeNum(row.views), 0).toLocaleString('en-IN')}
+                </strong>
                 {loadingDate ? ` · loading ${loadingDate}` : ''}
               </div>
             </div>
