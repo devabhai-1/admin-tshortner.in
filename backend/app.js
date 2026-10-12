@@ -409,7 +409,10 @@ async function loadRealtimeEmails(startS, endS) {
       for (const [code, row] of Object.entries(links)) {
         const email = row && typeof row.email === 'string' ? row.email.trim() : '';
         if (!email.includes('@')) continue;
-        map.set(String(code).toLowerCase(), email);
+        const rawKey = String(code).toLowerCase();
+        const loose = looseLinkId(code).toLowerCase();
+        if (!map.has(rawKey)) map.set(rawKey, email);
+        if (loose && !map.has(loose)) map.set(loose, email);
       }
     } catch (err) {
       console.error('realtime emails', day, err.message);
@@ -487,12 +490,20 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
   const remain = maxMs - (Date.now() - started);
   if (missing.length && remain > 3000) {
     await lookupOwners(missing, {
-      deadlineMs: Math.min(remain - 1500, 40000),
+      deadlineMs: Math.min(remain - 1000, 12000),
       concurrency: 40,
-      fetchMs: 4000,
+      fetchMs: 2500,
     });
     for (const raw of missing) {
       const emails = OWNER_CACHE.get(raw) || [];
+      const norm = normalizeId(raw);
+      if (norm && emails[0]) lidLookup[norm] = emails[0];
+    }
+  }
+  const still = missing.filter((raw) => !lidLookup[normalizeId(raw)]).slice(0, 200);
+  if (still.length) {
+    const looseFound = await lookupLooseOwners(still, { deadlineMs: 8000 });
+    for (const [raw, emails] of looseFound) {
       const norm = normalizeId(raw);
       if (norm && emails[0]) lidLookup[norm] = emails[0];
     }
@@ -1170,6 +1181,10 @@ function pathCode(path) {
   return parts[parts.length - 1].trim();
 }
 
+function looseLinkId(code) {
+  return String(code || '').replace(/--/g, '').replace(/__/g, '');
+}
+
 function emailsFromUsers(users) {
   if (!users || typeof users !== 'object') return [];
   const emails = [];
@@ -1182,6 +1197,62 @@ function emailsFromUsers(users) {
 }
 
 const OWNER_CACHE = new Map();
+
+async function lookupLooseOwners(codes, options = {}) {
+  const unique = [...new Set(codes.map((code) => String(code || '').trim()).filter(Boolean))];
+  const deadlineMs = options.deadlineMs || 8000;
+  const deadline = Date.now() + deadlineMs;
+  const found = new Map();
+  let cursor = 0;
+  async function worker() {
+    while (cursor < unique.length && Date.now() < deadline) {
+      const code = unique[cursor++];
+      const cached = OWNER_CACHE.get(code);
+      if (cached && cached.length) {
+        found.set(code, cached);
+        continue;
+      }
+      const prefix = code.slice(0, 12);
+      if (prefix.length < 8) continue;
+      try {
+        const params = new URLSearchParams({
+          orderBy: '"$key"',
+          startAt: JSON.stringify(prefix),
+          endAt: JSON.stringify(`${prefix}\uf8ff`),
+          limitToFirst: '6',
+        });
+        const res = await fetch(`${FIREBASE_DATABASE_URL}/allLinks.json?${params}`, {
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!res.ok) continue;
+        const body = await res.json();
+        if (!body || typeof body !== 'object') continue;
+        for (const [key, node] of Object.entries(body)) {
+          if (key !== code && looseLinkId(key) !== code) continue;
+          const fromUsers = emailsFromUsers(node && node.users);
+          const owner = node && typeof node.ownerEmail === 'string' && node.ownerEmail.includes('@')
+            ? [node.ownerEmail]
+            : [];
+          const list = fromUsers.length ? fromUsers : owner;
+          if (!list.length) continue;
+          OWNER_CACHE.set(code, list);
+          found.set(code, list);
+          break;
+        }
+      } catch {
+        /* try the next code */
+      }
+    }
+  }
+  const workers = Math.min(12, unique.length);
+  if (workers) {
+    await Promise.race([
+      Promise.all(Array.from({ length: workers }, () => worker())),
+      new Promise((resolve) => setTimeout(resolve, deadlineMs + 500)),
+    ]);
+  }
+  return found;
+}
 
 async function lookupOwners(codes, options = {}) {
   const unique = [...new Set(codes.map((code) => String(code || '').trim()).filter(Boolean))];

@@ -351,7 +351,7 @@ export default function GaFirebaseDashboard() {
       const cacheKey = gaOnly ? GA_ANALYTICS_SESSION_RAW : GA_ANALYTICS_SESSION_KEY
       const startDate = isoDateDaysAgo(GA_INITIAL_DAYS - 1)
       const endDate = isoDateDaysAgo(0)
-      const days = Array.from({ length: GA_INITIAL_DAYS }, (_, i) => isoDateDaysAgo(GA_INITIAL_DAYS - 1 - i))
+      const days = Array.from({ length: GA_INITIAL_DAYS }, (_, i) => isoDateDaysAgo(i))
 
       try {
         if (hadCachedUi) {
@@ -365,8 +365,10 @@ export default function GaFirebaseDashboard() {
         let incoming = []
         let meta = null
         const incomplete = []
+        setSelectedGaDate(isoDateDaysAgo(0))
         for (const day of days) {
-          setGaMsg({ text: `⟳ ${day} ki saari views load ho rahi hain…`, kind: 'neutral' })
+          setLoadingDate(day)
+          setGaMsg({ text: `⟳ ${day} ki views load ho rahi hain…`, kind: 'neutral' })
           const part = await streamGaRange(day, day, {
             gaOnly,
             refreshMap: false,
@@ -1164,11 +1166,13 @@ export default function GaFirebaseDashboard() {
                 {!allocationRows.length ? (
                   <tr className="empty">
                     <td colSpan={6}>
-                      {!analyticsReady && !analyticsRows.length
-                        ? '⏳ Loading GA4 analytics...'
-                        : !analyticsRows.length
-                          ? 'No GA4 rows found.'
-                          : 'No rows for selected date.'}
+                      {loadingDate
+                        ? `⏳ ${loadingDate} load ho raha hai…`
+                        : !analyticsReady && !analyticsRows.length
+                          ? '⏳ Loading GA4 analytics...'
+                          : !analyticsRows.length
+                            ? 'No GA4 rows found.'
+                            : 'No rows for selected date.'}
                     </td>
                   </tr>
                 ) : (
