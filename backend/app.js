@@ -488,21 +488,34 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
     .filter((raw) => !lidLookup[normalizeId(raw)])
     .sort((a, b) => viewByCode.get(b) - viewByCode.get(a));
   const remain = maxMs - (Date.now() - started);
-  if (missing.length && remain > 3000) {
+  const budget = Math.min(22000, Math.max(0, remain - 4000));
+  if (missing.length && budget > 2000) {
     await lookupOwners(missing, {
-      deadlineMs: Math.min(remain - 1000, 12000),
+      deadlineMs: budget,
       concurrency: 40,
-      fetchMs: 2500,
+      fetchMs: 4000,
     });
+    const retry = missing.filter((raw) => !OWNER_CACHE.has(raw));
+    const after = maxMs - (Date.now() - started);
+    if (retry.length && after > 4000) {
+      await lookupOwners(retry, {
+        deadlineMs: Math.min(after - 3000, 14000),
+        concurrency: 24,
+        fetchMs: 5000,
+      });
+    }
     for (const raw of missing) {
       const emails = OWNER_CACHE.get(raw) || [];
       const norm = normalizeId(raw);
       if (norm && emails[0]) lidLookup[norm] = emails[0];
     }
   }
-  const still = missing.filter((raw) => !lidLookup[normalizeId(raw)]).slice(0, 200);
-  if (still.length) {
-    const looseFound = await lookupLooseOwners(still, { deadlineMs: 8000 });
+  const afterLookup = maxMs - (Date.now() - started);
+  const still = missing.filter((raw) => !lidLookup[normalizeId(raw)]).slice(0, 400);
+  if (still.length && afterLookup > 3000) {
+    const looseFound = await lookupLooseOwners(still, {
+      deadlineMs: Math.min(afterLookup - 1500, 8000),
+    });
     for (const [raw, emails] of looseFound) {
       const norm = normalizeId(raw);
       if (norm && emails[0]) lidLookup[norm] = emails[0];
