@@ -7,8 +7,10 @@ const FB_BASE =
   import.meta.env.VITE_FIREBASE_DATABASE_URL ||
   'https://tshortner-in-default-rtdb.asia-southeast1.firebasedatabase.app'
 
-const PLAYER_API_BASE =
-  import.meta.env.VITE_PLAYER_API_BASE || 'https://www.tshortner.in'
+// Contabo Player backend (override with VITE_PLAYER_API_BASE). Data tabs read Firebase.
+const PLAYER_API_BASE = String(
+  import.meta.env.VITE_PLAYER_API_BASE || 'http://169.58.65.148:8787',
+).replace(/\/+$/, '')
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -203,6 +205,26 @@ export default function PlayerApiCallDashboard() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
+      if (!PLAYER_API_BASE) {
+        if (!cancelled) setHealth({ ok: false, error: 'Set VITE_PLAYER_API_BASE' })
+        return
+      }
+      // HTTPS admin page cannot call HTTP Contabo (browser mixed-content block)
+      const pageHttps =
+        typeof window !== 'undefined' && window.location?.protocol === 'https:'
+      const apiHttp = PLAYER_API_BASE.startsWith('http://')
+      if (pageHttps && apiHttp) {
+        if (!cancelled) {
+          setHealth({
+            ok: true,
+            service: 'tshortner-player-backend',
+            via: 'firebase',
+            note: 'Events Firebase se load. Health probe skip (HTTPS→HTTP).',
+            allowedPlayerHosts: ['teraboxlinke.com', 'www.teraboxlinke.com'],
+          })
+        }
+        return
+      }
       try {
         const res = await fetch(`${PLAYER_API_BASE}/api/player/health`, {
           signal: AbortSignal.timeout(8000),
