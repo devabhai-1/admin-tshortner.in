@@ -2,7 +2,7 @@ import { useDeferredValue, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import AdminSectionNav from '../components/AdminSectionNav.jsx'
 import { useUsersData } from '../context/usersDataContext.js'
-import { formatInt, formatUsd } from '../lib/formatMoney.js'
+import { formatInt, formatInr, formatUsd, usdToInr } from '../lib/formatMoney.js'
 import {
   decodeEmailKey,
   getEarningFromRow,
@@ -13,6 +13,12 @@ import {
 import './RevenueSharingDashboard.css'
 
 const RANGE_DAYS = 90
+/** 1 USD = 93 INR — brackets me rupee dikhane ke liye */
+const USD_TO_INR = 93
+
+function formatUsdInr(n) {
+  return `${formatUsd(n)} (${formatInr(usdToInr(n, USD_TO_INR))})`
+}
 
 function isoTodayKolkata() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
@@ -203,7 +209,8 @@ export default function RevenueSharingDashboard() {
           </h1>
           <p>
             Last {RANGE_DAYS} days — har date pe kitne dollar user ko share kiye (Firebase{' '}
-            <code>dashboard/daily.earning</code>). GA4 save ke baad yahi ledger dikhta hai.
+            <code>dashboard/daily.earning</code>). Dollar ke saath ₹ brackets me (1$ = ₹{USD_TO_INR}
+            ).
             {isStreaming && streamProgress
               ? ` Loading ${formatInt(streamProgress.loaded)} / ${formatInt(streamProgress.total)}…`
               : ''}
@@ -215,7 +222,7 @@ export default function RevenueSharingDashboard() {
       <div className="rev-share__kpi">
         <div className="rev-share__kpi-card highlight">
           <span>{RANGE_DAYS}-day shared ($)</span>
-          <strong>{ready ? formatUsd(analysis.grandTotal) : '…'}</strong>
+          <strong>{ready ? formatUsdInr(analysis.grandTotal) : '…'}</strong>
           <small>
             {ready
               ? `${formatInt(analysis.paidDayCount)} days with payout`
@@ -229,14 +236,14 @@ export default function RevenueSharingDashboard() {
         </div>
         <div className="rev-share__kpi-card ok">
           <span>Selected day</span>
-          <strong>{formatUsd(selectedDay.total)}</strong>
+          <strong>{formatUsdInr(selectedDay.total)}</strong>
           <small>
             {formatDayLabel(selectedDate)} · {formatInt(selectedDay.users)} users
           </small>
         </div>
         <div className="rev-share__kpi-card">
           <span>Avg / paid day</span>
-          <strong>{ready ? formatUsd(avgPerPaidDay) : '…'}</strong>
+          <strong>{ready ? formatUsdInr(avgPerPaidDay) : '…'}</strong>
           <small>only days with &gt; $0</small>
         </div>
       </div>
@@ -340,7 +347,7 @@ export default function RevenueSharingDashboard() {
                       <td>{formatDayLabel(row.date)}</td>
                       <td>{weekdayLabel(row.date)}</td>
                       <td>{formatInt(row.users)}</td>
-                      <td className="num">{formatUsd(row.total)}</td>
+                      <td className="num">{formatUsdInr(row.total)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -352,7 +359,7 @@ export default function RevenueSharingDashboard() {
             <h2>
               {formatDayLabel(selectedDate)} — user breakdown
               <small>
-                {formatUsd(selectedDay.total)} · {formatInt(selectedDayFiltered.length)} users
+                {formatUsdInr(selectedDay.total)} · {formatInt(selectedDayFiltered.length)} users
               </small>
             </h2>
             <div className="rev-share__table-wrap">
@@ -379,7 +386,7 @@ export default function RevenueSharingDashboard() {
                         <td>{i + 1}</td>
                         <td className="mail">{row.email}</td>
                         <td className="num">{formatInt(row.impressions)}</td>
-                        <td className="num">{formatUsd(row.earning)}</td>
+                        <td className="num">{formatUsdInr(row.earning)}</td>
                         <td>
                           <Link to="/mail">Mail</Link>
                         </td>
@@ -396,7 +403,7 @@ export default function RevenueSharingDashboard() {
           <h2>
             Users — {RANGE_DAYS}-day total
             <small>
-              {formatInt(filteredUserRows.length)} users · {formatUsd(analysis.grandTotal)}
+              {formatInt(filteredUserRows.length)} users · {formatUsdInr(analysis.grandTotal)}
             </small>
           </h2>
           <div className="rev-share__table-wrap">
@@ -433,10 +440,10 @@ export default function RevenueSharingDashboard() {
                       <td>{i + 1}</td>
                       <td className="mail">{row.email}</td>
                       <td className="num">{formatInt(row.dayCount)}</td>
-                      <td className="num strong">{formatUsd(row.total)}</td>
+                      <td className="num strong">{formatUsdInr(row.total)}</td>
                       <td>
                         {latest
-                          ? `${formatDayLabel(latest.date)} · ${formatUsd(latest.earning)}`
+                          ? `${formatDayLabel(latest.date)} · ${formatUsdInr(latest.earning)}`
                           : '—'}
                       </td>
                       <td>

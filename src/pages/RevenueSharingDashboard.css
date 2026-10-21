@@ -85,9 +85,11 @@
 .rev-share__kpi-card strong {
   display: block;
   margin-top: 6px;
-  font-size: 1.3rem;
+  font-size: 1.05rem;
   font-weight: 800;
   color: #f8fafc;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .rev-share__kpi-card small {
@@ -266,6 +268,7 @@
   font-variant-numeric: tabular-nums;
   text-align: right;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .rev-share__table td.num.strong {
