@@ -61,6 +61,33 @@
   background: rgba(22, 101, 52, 0.25);
 }
 
+.rev-share__pill.load {
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(8, 47, 73, 0.45);
+}
+
+.rev-share__bar {
+  margin-top: 12px;
+  height: 6px;
+  max-width: 420px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+
+.rev-share__bar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #4ade80);
+  transition: width 0.25s ease;
+}
+
+.rev-share__err {
+  margin: 8px 0 0 !important;
+  color: #fca5a5 !important;
+}
+
 .rev-share__kpi {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

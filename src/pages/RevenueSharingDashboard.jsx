@@ -1,12 +1,11 @@
-import { useDeferredValue, useMemo, useState } from 'react'
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import AdminSectionNav from '../components/AdminSectionNav.jsx'
-import { useUsersData } from '../context/usersDataContext.js'
 import { formatInt, formatInr, formatUsd, usdToInr } from '../lib/formatMoney.js'
 import {
   decodeEmailKey,
   getEarningFromRow,
-  readDailyMap,
+  normalizeDailyRow,
   safeNum,
   toFixed2,
 } from '../lib/tshortnerSchema.js'
@@ -15,6 +14,12 @@ import './RevenueSharingDashboard.css'
 const RANGE_DAYS = 90
 /** 1 USD = 93 INR — brackets me rupee dikhane ke liye */
 const USD_TO_INR = 93
+const FB_BASE =
+  import.meta.env.VITE_FIREBASE_DATABASE_URL ||
+  'https://tshortner-in-default-rtdb.asia-southeast1.firebasedatabase.app'
+const CACHE_KEY = 'tshortner.admin.revenueShare.v1'
+const FETCH_CONCURRENCY = 48
+const FETCH_TIMEOUT_MS = 8000
 
 function formatUsdInr(n) {
   return `${formatUsd(n)} (${formatInr(usdToInr(n, USD_TO_INR))})`
@@ -57,104 +62,319 @@ function weekdayLabel(iso) {
   })
 }
 
-export default function RevenueSharingDashboard() {
-  const { usersVal, ready, sessionLoaded, streamProgress, lastSync, refreshUsersData } =
-    useUsersData()
+function readCache(today) {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || parsed.today !== today || !Array.isArray(parsed.dateRows)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
 
+function writeCache(payload) {
+  try {
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+  } catch {
+    /* quota */
+  }
+}
+
+function emptyAnalysis(days) {
+  return {
+    dateRows: [...days]
+      .reverse()
+      .map((date) => ({ date, total: 0, users: 0, rows: [] })),
+    userRows: [],
+    grandTotal: 0,
+    paidUserCount: 0,
+    paidDayCount: 0,
+    scannedUsers: 0,
+  }
+}
+
+function buildAnalysis(userDailyList, days, daySet) {
+  const byDate = new Map()
+  for (const day of days) {
+    byDate.set(day, { date: day, total: 0, users: 0, rows: [] })
+  }
+
+  const byUser = new Map()
+  let grandTotal = 0
+  let paidUserCount = 0
+  let paidDayCount = 0
+
+  for (const item of userDailyList) {
+    const { emailKey, email, daily } = item
+    let userTotal = 0
+    const userDays = []
+
+    for (const [date, rawRow] of Object.entries(daily || {})) {
+      if (!daySet.has(date)) continue
+      const row = normalizeDailyRow(rawRow)
+      const earn = toFixed2(getEarningFromRow(row))
+      if (earn <= 0) continue
+      const imps = safeNum(row.impressions)
+      userTotal += earn
+      userDays.push({ date, earning: earn, impressions: imps, cpm: safeNum(row.cpm) })
+
+      const bucket = byDate.get(date)
+      if (bucket) {
+        bucket.total += earn
+        bucket.users += 1
+        bucket.rows.push({ email, emailKey, earning: earn, impressions: imps })
+      }
+    }
+
+    if (userTotal > 0) {
+      paidUserCount += 1
+      userDays.sort((a, b) => (a.date < b.date ? 1 : -1))
+      byUser.set(emailKey, {
+        email,
+        emailKey,
+        total: toFixed2(userTotal),
+        days: userDays,
+        dayCount: userDays.length,
+      })
+      grandTotal += userTotal
+    }
+  }
+
+  const dateRows = days
+    .map((date) => {
+      const bucket = byDate.get(date)
+      const total = toFixed2(bucket?.total || 0)
+      const rows = (bucket?.rows || []).slice().sort((a, b) => b.earning - a.earning)
+      if (total > 0) paidDayCount += 1
+      return {
+        date,
+        total,
+        users: bucket?.users || 0,
+        rows,
+      }
+    })
+    .reverse()
+
+  return {
+    dateRows,
+    userRows: [...byUser.values()].sort((a, b) => b.total - a.total),
+    grandTotal: toFixed2(grandTotal),
+    paidUserCount,
+    paidDayCount,
+    scannedUsers: userDailyList.length,
+  }
+}
+
+async function fetchJson(url, parentSignal) {
+  const ac = new AbortController()
+  const onAbort = () => ac.abort()
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      ac.abort()
+    } else {
+      parentSignal.addEventListener('abort', onAbort, { once: true })
+    }
+  }
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(url, { signal: ac.signal })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  } finally {
+    clearTimeout(timer)
+    if (parentSignal) parentSignal.removeEventListener('abort', onAbort)
+  }
+}
+
+async function mapPool(items, concurrency, fn, signal) {
+  let cursor = 0
+  async function worker() {
+    while (cursor < items.length) {
+      if (signal?.aborted) return
+      const idx = cursor
+      cursor += 1
+      await fn(items[idx], idx)
+    }
+  }
+  const n = Math.min(concurrency, Math.max(1, items.length))
+  await Promise.all(Array.from({ length: n }, () => worker()))
+}
+
+/** Sirf earning wale users ka daily — poora users dump skip */
+async function loadUserDailyMaps(preferredKeys, onProgress, signal) {
+  let keys = Array.isArray(preferredKeys) ? preferredKeys.filter(Boolean) : []
+  let totalKeys = keys.length
+
+  if (!keys.length) {
+    const keysObj = await fetchJson(`${FB_BASE}/users.json?shallow=true`, signal)
+    const allKeys = Object.keys(keysObj || {})
+    totalKeys = allKeys.length
+    const paid = []
+    let scanned = 0
+    await mapPool(
+      allKeys,
+      60,
+      async (emailKey) => {
+        try {
+          const te = await fetchJson(
+            `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard/totalEarning.json`,
+            signal,
+          )
+          if (safeNum(te) > 0) paid.push(emailKey)
+        } catch {
+          /* skip */
+        }
+        scanned += 1
+        if (scanned % 80 === 0 || scanned === allKeys.length) {
+          onProgress({
+            phase: 'filter',
+            loaded: scanned,
+            total: allKeys.length,
+            usersWithDaily: paid.length,
+            list: [],
+          })
+        }
+      },
+      signal,
+    )
+    keys = paid
+  }
+
+  const out = []
+  let done = 0
+  await mapPool(
+    keys,
+    FETCH_CONCURRENCY,
+    async (emailKey) => {
+      try {
+        const daily = await fetchJson(
+          `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard/daily.json`,
+          signal,
+        )
+        if (daily && typeof daily === 'object') {
+          out.push({
+            emailKey,
+            email: decodeEmailKey(emailKey),
+            daily,
+          })
+        }
+      } catch {
+        /* skip failed user */
+      }
+      done += 1
+      if (done % 20 === 0 || done === keys.length) {
+        onProgress({
+          phase: 'daily',
+          loaded: done,
+          total: keys.length,
+          usersWithDaily: out.length,
+          list: out,
+        })
+      }
+    },
+    signal,
+  )
+
+  return { list: out, totalKeys: totalKeys || keys.length, paidKeys: keys.length }
+}
+
+export default function RevenueSharingDashboard() {
   const days = useMemo(() => buildLastNDays(RANGE_DAYS), [])
   const daySet = useMemo(() => new Set(days), [days])
   const today = days[days.length - 1] || isoTodayKolkata()
 
+  const cached = useMemo(() => readCache(today), [today])
+  const [analysis, setAnalysis] = useState(() => cached || emptyAnalysis(days))
+  const [ready, setReady] = useState(() => !!cached)
+  const [loading, setLoading] = useState(() => !cached)
+  const [progress, setProgress] = useState(null)
+  const [error, setError] = useState('')
+  const [lastSync, setLastSync] = useState(() => cached?.t || null)
+  const [fromCache, setFromCache] = useState(() => !!cached)
+
   const [selectedDate, setSelectedDate] = useState(today)
-  const [view, setView] = useState('dates') // dates | users
+  const [view, setView] = useState('dates')
   const [search, setSearch] = useState('')
-  const [sortUsers, setSortUsers] = useState('earn') // earn | email
+  const [sortUsers, setSortUsers] = useState('earn')
   const deferredSearch = useDeferredValue(search)
+  const abortRef = useRef(null)
+  const runIdRef = useRef(0)
 
-  const isStreaming = streamProgress?.streaming === true
+  const runLoad = (force = false) => {
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
+    const runId = ++runIdRef.current
 
-  const analysis = useMemo(() => {
-    const byDate = new Map()
-    for (const day of days) {
-      byDate.set(day, { date: day, total: 0, users: 0, rows: [] })
+    setLoading(true)
+    setError('')
+    if (!force && cached) {
+      setFromCache(true)
+      setReady(true)
+    } else if (force) {
+      setFromCache(false)
+      setAnalysis(emptyAnalysis(days))
     }
 
-    const byUser = new Map()
-    let grandTotal = 0
-    let paidUserCount = 0
-    let paidDayCount = 0
+    void (async () => {
+      try {
+        const { list, totalKeys, paidKeys } = await loadUserDailyMaps(
+          [],
+          (p) => {
+            if (runId !== runIdRef.current) return
+            setProgress({
+              phase: p.phase,
+              loaded: p.loaded,
+              total: p.total,
+              usersWithDaily: p.usersWithDaily,
+            })
+            if (
+              p.phase === 'daily' &&
+              p.list?.length &&
+              (p.loaded % 40 === 0 || p.loaded === p.total)
+            ) {
+              startTransition(() => {
+                const snap = buildAnalysis(p.list.slice(), days, daySet)
+                snap.scannedUsers = p.total
+                setAnalysis(snap)
+                setReady(true)
+              })
+            }
+          },
+          ac.signal,
+        )
 
-    const entries =
-      usersVal && typeof usersVal === 'object' ? Object.entries(usersVal) : []
+        if (runId !== runIdRef.current) return
 
-    for (const [emailKey, raw] of entries) {
-      if (!raw || typeof raw !== 'object') continue
-      const email =
-        String(raw.profile?.email || '').trim() || decodeEmailKey(emailKey)
-      if (!email.includes('@')) continue
-
-      const daily = readDailyMap(raw.dashboard)
-      let userTotal = 0
-      const userDays = []
-
-      for (const [date, row] of Object.entries(daily)) {
-        if (!daySet.has(date)) continue
-        const earn = toFixed2(getEarningFromRow(row))
-        if (earn <= 0) continue
-        const imps = safeNum(row.impressions)
-        userTotal += earn
-        userDays.push({ date, earning: earn, impressions: imps, cpm: safeNum(row.cpm) })
-
-        const bucket = byDate.get(date)
-        if (bucket) {
-          bucket.total += earn
-          bucket.users += 1
-          bucket.rows.push({ email, emailKey, earning: earn, impressions: imps })
-        }
+        const next = buildAnalysis(list, days, daySet)
+        next.scannedUsers = totalKeys || paidKeys
+        setAnalysis(next)
+        setReady(true)
+        setFromCache(false)
+        const t = Date.now()
+        setLastSync(t)
+        writeCache({ today, t, ...next })
+        setProgress(null)
+      } catch (err) {
+        if (runId !== runIdRef.current) return
+        if (err?.name === 'AbortError') return
+        setError(err?.message || 'Load failed')
+      } finally {
+        if (runId === runIdRef.current) setLoading(false)
       }
+    })()
+  }
 
-      if (userTotal > 0) {
-        paidUserCount += 1
-        userDays.sort((a, b) => (a.date < b.date ? 1 : -1))
-        byUser.set(emailKey, {
-          email,
-          emailKey,
-          total: toFixed2(userTotal),
-          days: userDays,
-          dayCount: userDays.length,
-        })
-        grandTotal += userTotal
-      }
+  useEffect(() => {
+    runLoad(false)
+    return () => {
+      runIdRef.current += 1
+      abortRef.current?.abort()
     }
-
-    const dateRows = days
-      .map((date) => {
-        const bucket = byDate.get(date)
-        const total = toFixed2(bucket?.total || 0)
-        const rows = (bucket?.rows || [])
-          .slice()
-          .sort((a, b) => b.earning - a.earning)
-        if (total > 0) paidDayCount += 1
-        return {
-          date,
-          total,
-          users: bucket?.users || 0,
-          rows,
-        }
-      })
-      .reverse()
-
-    const userRows = [...byUser.values()].sort((a, b) => b.total - a.total)
-
-    return {
-      dateRows,
-      userRows,
-      grandTotal: toFixed2(grandTotal),
-      paidUserCount,
-      paidDayCount,
-      scannedUsers: entries.length,
-    }
-  }, [usersVal, days, daySet])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [today])
 
   const selectedDay = useMemo(() => {
     return (
@@ -197,24 +417,46 @@ export default function RevenueSharingDashboard() {
       ? toFixed2(analysis.grandTotal / analysis.paidDayCount)
       : 0
 
+  const pct =
+    progress && progress.total
+      ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
+      : loading
+        ? 5
+        : 100
+
   return (
     <div className="rev-share">
       <header className="rev-share__hero">
         <div>
           <h1>
             Date Total Revenue Sharing
-            <span className={'rev-share__pill ' + (sessionLoaded && !isStreaming ? 'on' : '')}>
-              {isStreaming ? '⟳ Loading' : sessionLoaded ? '● Ready' : '○ …'}
+            <span
+              className={
+                'rev-share__pill ' + (ready && !loading ? 'on' : loading ? 'load' : '')
+              }
+            >
+              {loading
+                ? `⟳ ${pct}%`
+                : ready
+                  ? fromCache
+                    ? '● Cache'
+                    : '● Ready'
+                  : '○ …'}
             </span>
           </h1>
           <p>
-            Last {RANGE_DAYS} days — har date pe kitne dollar user ko share kiye (Firebase{' '}
-            <code>dashboard/daily.earning</code>). Dollar ke saath ₹ brackets me (1$ = ₹{USD_TO_INR}
-            ).
-            {isStreaming && streamProgress
-              ? ` Loading ${formatInt(streamProgress.loaded)} / ${formatInt(streamProgress.total)}…`
+            Last {RANGE_DAYS} days — har date pe kitne dollar user ko share kiye. Dollar ke saath ₹
+            brackets me (1$ = ₹{USD_TO_INR}). Lightweight load: pehle earning filter, phir daily.
+            {loading && progress
+              ? ` · ${progress.phase === 'filter' ? 'filter' : 'daily'} ${formatInt(progress.loaded)} / ${formatInt(progress.total)}`
               : ''}
           </p>
+          {loading ? (
+            <div className="rev-share__bar" aria-hidden>
+              <i style={{ width: `${pct}%` }} />
+            </div>
+          ) : null}
+          {error ? <p className="rev-share__err">⚠ {error}</p> : null}
         </div>
         <AdminSectionNav />
       </header>
@@ -299,10 +541,17 @@ export default function RevenueSharingDashboard() {
         <button
           type="button"
           className="rev-share__refresh"
-          onClick={() => refreshUsersData()}
-          disabled={isStreaming}
+          onClick={() => {
+            try {
+              sessionStorage.removeItem(CACHE_KEY)
+            } catch {
+              /* ignore */
+            }
+            void runLoad(true)
+          }}
+          disabled={loading}
         >
-          Refresh
+          {loading ? 'Loading…' : 'Refresh'}
         </button>
         {lastSync ? (
           <span className="rev-share__sync">
@@ -324,14 +573,14 @@ export default function RevenueSharingDashboard() {
                     <th>Date</th>
                     <th>Day</th>
                     <th>Users</th>
-                    <th>Shared ($)</th>
+                    <th>Shared ($ / ₹)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {!ready && !filteredDateRows.length ? (
+                  {!ready && !filteredDateRows.some((r) => r.total > 0) ? (
                     <tr>
                       <td colSpan={4} className="rev-share__empty">
-                        Users load ho rahe hain…
+                        Daily earning load ho rahi hai…
                       </td>
                     </tr>
                   ) : null}
@@ -369,7 +618,7 @@ export default function RevenueSharingDashboard() {
                     <th>#</th>
                     <th>Email</th>
                     <th>Impressions</th>
-                    <th>Shared ($)</th>
+                    <th>Shared ($ / ₹)</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -377,7 +626,9 @@ export default function RevenueSharingDashboard() {
                   {!selectedDayFiltered.length ? (
                     <tr>
                       <td colSpan={5} className="rev-share__empty">
-                        Is date pe koi earning share nahi hai.
+                        {loading
+                          ? 'Load chal raha hai — thodi der me users aayenge…'
+                          : 'Is date pe koi earning share nahi hai.'}
                       </td>
                     </tr>
                   ) : (
@@ -413,7 +664,7 @@ export default function RevenueSharingDashboard() {
                   <th>#</th>
                   <th>Email</th>
                   <th>Days paid</th>
-                  <th>Total shared ($)</th>
+                  <th>Total shared ($ / ₹)</th>
                   <th>Latest day</th>
                   <th></th>
                 </tr>
@@ -426,7 +677,7 @@ export default function RevenueSharingDashboard() {
                     </td>
                   </tr>
                 ) : null}
-                {!filteredUserRows.length && ready ? (
+                {!filteredUserRows.length && ready && !loading ? (
                   <tr>
                     <td colSpan={6} className="rev-share__empty">
                       Is range me koi shared earning nahi mili.
