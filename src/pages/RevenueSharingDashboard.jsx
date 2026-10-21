@@ -295,12 +295,30 @@ export default function RevenueSharingDashboard() {
   const [fromCache, setFromCache] = useState(() => !!cached)
 
   const [selectedDate, setSelectedDate] = useState(today)
+  const [rangeFrom, setRangeFrom] = useState(() => addDaysIso(today, -6))
+  const [rangeTo, setRangeTo] = useState(today)
   const [view, setView] = useState('dates')
   const [search, setSearch] = useState('')
   const [sortUsers, setSortUsers] = useState('earn')
   const deferredSearch = useDeferredValue(search)
   const abortRef = useRef(null)
   const runIdRef = useRef(0)
+
+  const minDay = days[0] || today
+  const from = rangeFrom <= rangeTo ? rangeFrom : rangeTo
+  const to = rangeFrom <= rangeTo ? rangeTo : rangeFrom
+
+  const clampDate = (iso) => {
+    if (!iso) return today
+    if (iso < minDay) return minDay
+    if (iso > today) return today
+    return iso
+  }
+
+  const setPreset = (n) => {
+    setRangeFrom(clampDate(addDaysIso(today, -(n - 1))))
+    setRangeTo(today)
+  }
 
   const runLoad = (force = false) => {
     abortRef.current?.abort()
@@ -376,6 +394,10 @@ export default function RevenueSharingDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [today])
 
+  useEffect(() => {
+    if (selectedDate < from || selectedDate > to) setSelectedDate(to)
+  }, [from, to, selectedDate])
+
   const selectedDay = useMemo(() => {
     return (
       analysis.dateRows.find((row) => row.date === selectedDate) || {
@@ -387,25 +409,62 @@ export default function RevenueSharingDashboard() {
     )
   }, [analysis.dateRows, selectedDate])
 
+  const rangeStats = useMemo(() => {
+    let total = 0
+    let paidDays = 0
+    const mailSet = new Set()
+    for (const row of analysis.dateRows) {
+      if (row.date < from || row.date > to) continue
+      total += safeNum(row.total)
+      if (safeNum(row.total) > 0) paidDays += 1
+      for (const u of row.rows) mailSet.add(u.emailKey)
+    }
+    return {
+      total: toFixed2(total),
+      paidDays,
+      users: mailSet.size,
+      daySpan: Math.max(0, days.filter((d) => d >= from && d <= to).length),
+    }
+  }, [analysis.dateRows, from, to, days])
+
   const q = deferredSearch.trim().toLowerCase()
 
   const filteredDateRows = useMemo(() => {
-    if (!q) return analysis.dateRows
-    return analysis.dateRows.filter(
-      (row) =>
-        row.date.includes(q) ||
-        row.rows.some((u) => u.email.toLowerCase().includes(q)),
-    )
-  }, [analysis.dateRows, q])
+    let list = analysis.dateRows.filter((row) => row.date >= from && row.date <= to)
+    if (q) {
+      list = list.filter(
+        (row) =>
+          row.date.includes(q) ||
+          row.rows.some((u) => u.email.toLowerCase().includes(q)),
+      )
+    }
+    return list
+  }, [analysis.dateRows, from, to, q])
 
   const filteredUserRows = useMemo(() => {
     let list = analysis.userRows
+      .map((row) => {
+        const inRange = (row.days || []).filter((d) => d.date >= from && d.date <= to)
+        if (!inRange.length) return null
+        const total = toFixed2(inRange.reduce((s, d) => s + safeNum(d.earning), 0))
+        if (total <= 0) return null
+        return {
+          ...row,
+          total,
+          days: inRange,
+          dayCount: inRange.length,
+        }
+      })
+      .filter(Boolean)
+
     if (q) list = list.filter((row) => row.email.toLowerCase().includes(q))
     if (sortUsers === 'email') {
       list = list.slice().sort((a, b) => a.email.localeCompare(b.email))
+    } else {
+      list = list.slice().sort((a, b) => b.total - a.total)
     }
     return list
-  }, [analysis.userRows, q, sortUsers])
+  }, [analysis.userRows, from, to, q, sortUsers])
 
   const selectedDayFiltered = useMemo(() => {
     if (!q) return selectedDay.rows
@@ -413,9 +472,7 @@ export default function RevenueSharingDashboard() {
   }, [selectedDay.rows, q])
 
   const avgPerPaidDay =
-    analysis.paidDayCount > 0
-      ? toFixed2(analysis.grandTotal / analysis.paidDayCount)
-      : 0
+    rangeStats.paidDays > 0 ? toFixed2(rangeStats.total / rangeStats.paidDays) : 0
 
   const pct =
     progress && progress.total
@@ -461,23 +518,61 @@ export default function RevenueSharingDashboard() {
         <AdminSectionNav />
       </header>
 
+      <div className="rev-share__range-bar">
+        <label className="rev-share__date">
+          <span>From date</span>
+          <input
+            type="date"
+            value={from}
+            min={minDay}
+            max={to}
+            onChange={(e) => setRangeFrom(clampDate(e.target.value))}
+          />
+        </label>
+        <label className="rev-share__date">
+          <span>To date</span>
+          <input
+            type="date"
+            value={to}
+            min={from}
+            max={today}
+            onChange={(e) => setRangeTo(clampDate(e.target.value))}
+          />
+        </label>
+        <div className="rev-share__presets">
+          <button type="button" onClick={() => setPreset(7)}>
+            7d
+          </button>
+          <button type="button" onClick={() => setPreset(30)}>
+            30d
+          </button>
+          <button type="button" onClick={() => setPreset(RANGE_DAYS)}>
+            90d
+          </button>
+        </div>
+        <div className="rev-share__range-total">
+          <span>
+            Range total · {formatDayLabel(from)} → {formatDayLabel(to)}
+          </span>
+          <strong>{ready ? formatUsdInr(rangeStats.total) : '…'}</strong>
+        </div>
+      </div>
+
       <div className="rev-share__kpi">
         <div className="rev-share__kpi-card highlight">
-          <span>{RANGE_DAYS}-day shared ($)</span>
-          <strong>{ready ? formatUsdInr(analysis.grandTotal) : '…'}</strong>
+          <span>Selected range total</span>
+          <strong>{ready ? formatUsdInr(rangeStats.total) : '…'}</strong>
           <small>
-            {ready
-              ? `${formatInt(analysis.paidDayCount)} days with payout`
-              : 'loading'}
+            {formatDayLabel(from)} → {formatDayLabel(to)} · {formatInt(rangeStats.daySpan)} days
           </small>
         </div>
         <div className="rev-share__kpi-card">
-          <span>Users paid</span>
-          <strong>{ready ? formatInt(analysis.paidUserCount) : '…'}</strong>
-          <small>of {formatInt(analysis.scannedUsers)} scanned</small>
+          <span>Users in range</span>
+          <strong>{ready ? formatInt(rangeStats.users) : '…'}</strong>
+          <small>{formatInt(rangeStats.paidDays)} days with payout</small>
         </div>
         <div className="rev-share__kpi-card ok">
-          <span>Selected day</span>
+          <span>Focus day</span>
           <strong>{formatUsdInr(selectedDay.total)}</strong>
           <small>
             {formatDayLabel(selectedDate)} · {formatInt(selectedDay.users)} users
@@ -486,7 +581,12 @@ export default function RevenueSharingDashboard() {
         <div className="rev-share__kpi-card">
           <span>Avg / paid day</span>
           <strong>{ready ? formatUsdInr(avgPerPaidDay) : '…'}</strong>
-          <small>only days with &gt; $0</small>
+          <small>inside selected range</small>
+        </div>
+        <div className="rev-share__kpi-card">
+          <span>Full {RANGE_DAYS}-day</span>
+          <strong>{ready ? formatUsdInr(analysis.grandTotal) : '…'}</strong>
+          <small>{formatInt(analysis.paidUserCount)} users all-time in window</small>
         </div>
       </div>
 
@@ -521,8 +621,8 @@ export default function RevenueSharingDashboard() {
           <input
             type="date"
             value={selectedDate}
-            min={days[0]}
-            max={today}
+            min={from}
+            max={to}
             onChange={(e) => {
               setSelectedDate(e.target.value)
               setView('dates')
@@ -564,7 +664,10 @@ export default function RevenueSharingDashboard() {
         <div className="rev-share__split">
           <section className="rev-share__panel">
             <h2>
-              Daily totals <small>{RANGE_DAYS} days · newest first</small>
+              Daily totals{' '}
+              <small>
+                {formatDayLabel(from)} → {formatDayLabel(to)} · {formatUsdInr(rangeStats.total)}
+              </small>
             </h2>
             <div className="rev-share__table-wrap">
               <table className="rev-share__table">
@@ -652,9 +755,9 @@ export default function RevenueSharingDashboard() {
       ) : (
         <section className="rev-share__panel full">
           <h2>
-            Users — {RANGE_DAYS}-day total
+            Users — range total
             <small>
-              {formatInt(filteredUserRows.length)} users · {formatUsdInr(analysis.grandTotal)}
+              {formatInt(filteredUserRows.length)} users · {formatUsdInr(rangeStats.total)}
             </small>
           </h2>
           <div className="rev-share__table-wrap">
