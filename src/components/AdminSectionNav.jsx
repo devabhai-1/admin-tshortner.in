@@ -7,6 +7,7 @@ const LINKS = [
   { to: '/telegram-ids', label: 'Telegram IDs', end: false },
   { to: '/mail', label: 'Mail Dashboard', end: false },
   { to: '/revenue-sharing', label: 'Revenue Sharing', end: false },
+  { to: '/api-call', label: 'API Call', end: false },
   { to: '/ga4', label: 'GA4 Analysis', end: false },
   { to: '/demographics', label: 'Demographics', end: false },
   { to: '/pages', label: 'Pages', end: false },

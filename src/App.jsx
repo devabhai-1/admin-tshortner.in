@@ -9,6 +9,7 @@ import DemographicDashboard from './pages/DemographicDashboard.jsx'
 import PagesDashboard from './pages/PagesDashboard.jsx'
 import RealtimeDashboard from './pages/RealtimeDashboard.jsx'
 import RevenueSharingDashboard from './pages/RevenueSharingDashboard.jsx'
+import PlayerApiCallDashboard from './pages/PlayerApiCallDashboard.jsx'
 import Login from './pages/Login.jsx'
 import { useAuth } from './context/AuthProvider.jsx'
 import { FirebaseProvider } from './context/FirebaseProvider.jsx'
@@ -38,6 +39,7 @@ function ProtectedApp() {
               <NavLink to="/telegram-ids">Telegram IDs</NavLink>
               <NavLink to="/mail">Mail Dashboard</NavLink>
               <NavLink to="/revenue-sharing">Revenue Sharing</NavLink>
+              <NavLink to="/api-call">API Call</NavLink>
               <NavLink to="/withdrawals">Withdrawals</NavLink>
               <button
                 type="button"
@@ -63,6 +65,7 @@ function ProtectedApp() {
               <Route path="/telegram-ids" element={<TelegramIdsDashboard />} />
               <Route path="/mail" element={<MailDashboard />} />
               <Route path="/revenue-sharing" element={<RevenueSharingDashboard />} />
+              <Route path="/api-call" element={<PlayerApiCallDashboard />} />
               <Route path="/withdrawals" element={<WithdrawalPanel />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
