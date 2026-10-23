@@ -377,6 +377,58 @@
   padding: 28px 12px !important;
 }
 
+.rev-share__table-wrap--wide {
+  max-height: calc(100vh - 300px);
+}
+
+.rev-share__table--mail-days th {
+  text-align: center;
+  white-space: nowrap;
+  min-width: 72px;
+}
+
+.rev-share__table--mail-days th:nth-child(2),
+.rev-share__table--mail-days td.mail {
+  text-align: left;
+  min-width: 180px;
+  position: sticky;
+  left: 0;
+  background: #0f172a;
+  z-index: 2;
+}
+
+.rev-share__table--mail-days td.mail {
+  z-index: 1;
+  background: rgba(15, 23, 42, 0.96);
+}
+
+.rev-share__table--mail-days th em {
+  display: block;
+  font-style: normal;
+  font-weight: 500;
+  color: #64748b;
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.rev-share__table--mail-days td.day-cell {
+  text-align: center;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.rev-share__table--mail-days td.day-cell.has {
+  color: #7dd3fc;
+  font-weight: 700;
+}
+
+.rev-share__presets button.on {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(8, 47, 73, 0.65);
+  color: #e0f2fe;
+}
+
 @media (max-width: 960px) {
   .rev-share__split {
     grid-template-columns: 1fr;

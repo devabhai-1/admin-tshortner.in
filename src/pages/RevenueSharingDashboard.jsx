@@ -5,19 +5,21 @@ import { formatInt, formatInr, formatUsd, usdToInr } from '../lib/formatMoney.js
 import {
   decodeEmailKey,
   getEarningFromRow,
-  normalizeDailyRow,
+  readDailyMap,
   safeNum,
   toFixed2,
 } from '../lib/tshortnerSchema.js'
 import './RevenueSharingDashboard.css'
 
+/** Load/window max — UI default latest 7 days */
 const RANGE_DAYS = 90
-/** 1 USD = 93 INR — brackets me rupee dikhane ke liye */
+const DEFAULT_VIEW_DAYS = 7
+/** 1 USD = 93 INR */
 const USD_TO_INR = 93
 const FB_BASE =
   import.meta.env.VITE_FIREBASE_DATABASE_URL ||
   'https://tshortner-in-default-rtdb.asia-southeast1.firebasedatabase.app'
-const CACHE_KEY = 'tshortner.admin.revenueShare.v1'
+const CACHE_KEY = 'tshortner.admin.revenueShare.v2'
 const FETCH_CONCURRENCY = 48
 const FETCH_TIMEOUT_MS = 8000
 
@@ -49,6 +51,16 @@ function formatDayLabel(iso) {
     day: '2-digit',
     month: 'short',
     year: '2-digit',
+    timeZone: 'UTC',
+  })
+}
+
+function shortDayLabel(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
     timeZone: 'UTC',
   })
 }
@@ -110,21 +122,25 @@ function buildAnalysis(userDailyList, days, daySet) {
     const { emailKey, email, daily } = item
     let userTotal = 0
     const userDays = []
+    const byDayEarn = {}
 
     for (const [date, rawRow] of Object.entries(daily || {})) {
       if (!daySet.has(date)) continue
-      const row = normalizeDailyRow(rawRow)
-      const earn = toFixed2(getEarningFromRow(row))
-      if (earn <= 0) continue
-      const imps = safeNum(row.impressions)
-      userTotal += earn
-      userDays.push({ date, earning: earn, impressions: imps, cpm: safeNum(row.cpm) })
-
-      const bucket = byDate.get(date)
-      if (bucket) {
-        bucket.total += earn
-        bucket.users += 1
-        bucket.rows.push({ email, emailKey, earning: earn, impressions: imps })
+      const earn = toFixed2(getEarningFromRow(rawRow))
+      const imps = safeNum(rawRow?.impressions)
+      if (earn <= 0 && imps <= 0) continue
+      if (earn > 0) {
+        userTotal += earn
+        userDays.push({ date, earning: earn, impressions: imps, cpm: safeNum(rawRow?.cpm) })
+        byDayEarn[date] = { earning: earn, impressions: imps }
+        const bucket = byDate.get(date)
+        if (bucket) {
+          bucket.total += earn
+          bucket.users += 1
+          bucket.rows.push({ email, emailKey, earning: earn, impressions: imps })
+        }
+      } else if (imps > 0) {
+        byDayEarn[date] = { earning: 0, impressions: imps }
       }
     }
 
@@ -136,6 +152,7 @@ function buildAnalysis(userDailyList, days, daySet) {
         emailKey,
         total: toFixed2(userTotal),
         days: userDays,
+        byDay: byDayEarn,
         dayCount: userDays.length,
       })
       grandTotal += userTotal
@@ -202,7 +219,7 @@ async function mapPool(items, concurrency, fn, signal) {
   await Promise.all(Array.from({ length: n }, () => worker()))
 }
 
-/** Sirf earning wale users ka daily — poora users dump skip */
+/** Earning wale users → dashboard daily (+ legacy dailyStats) */
 async function loadUserDailyMaps(preferredKeys, onProgress, signal) {
   let keys = Array.isArray(preferredKeys) ? preferredKeys.filter(Boolean) : []
   let totalKeys = keys.length
@@ -249,11 +266,12 @@ async function loadUserDailyMaps(preferredKeys, onProgress, signal) {
     FETCH_CONCURRENCY,
     async (emailKey) => {
       try {
-        const daily = await fetchJson(
-          `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard/daily.json`,
+        const dash = await fetchJson(
+          `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard.json`,
           signal,
         )
-        if (daily && typeof daily === 'object') {
+        const daily = readDailyMap(dash)
+        if (daily && Object.keys(daily).length) {
           out.push({
             emailKey,
             email: decodeEmailKey(emailKey),
@@ -295,9 +313,9 @@ export default function RevenueSharingDashboard() {
   const [fromCache, setFromCache] = useState(() => !!cached)
 
   const [selectedDate, setSelectedDate] = useState(today)
-  const [rangeFrom, setRangeFrom] = useState(() => addDaysIso(today, -6))
+  const [rangeFrom, setRangeFrom] = useState(() => addDaysIso(today, -(DEFAULT_VIEW_DAYS - 1)))
   const [rangeTo, setRangeTo] = useState(today)
-  const [view, setView] = useState('dates')
+  const [view, setView] = useState('users')
   const [search, setSearch] = useState('')
   const [sortUsers, setSortUsers] = useState('earn')
   const deferredSearch = useDeferredValue(search)
@@ -307,6 +325,16 @@ export default function RevenueSharingDashboard() {
   const minDay = days[0] || today
   const from = rangeFrom <= rangeTo ? rangeFrom : rangeTo
   const to = rangeFrom <= rangeTo ? rangeTo : rangeFrom
+
+  const rangeDaysAsc = useMemo(() => {
+    const out = []
+    let cur = from
+    while (cur && cur <= to && out.length < 90) {
+      out.push(cur)
+      cur = addDaysIso(cur, 1)
+    }
+    return out
+  }, [from, to])
 
   const clampDate = (iso) => {
     if (!iso) return today
@@ -318,6 +346,7 @@ export default function RevenueSharingDashboard() {
   const setPreset = (n) => {
     setRangeFrom(clampDate(addDaysIso(today, -(n - 1))))
     setRangeTo(today)
+    setSelectedDate(today)
   }
 
   const runLoad = (force = false) => {
@@ -423,9 +452,9 @@ export default function RevenueSharingDashboard() {
       total: toFixed2(total),
       paidDays,
       users: mailSet.size,
-      daySpan: Math.max(0, days.filter((d) => d >= from && d <= to).length),
+      daySpan: rangeDaysAsc.length,
     }
-  }, [analysis.dateRows, from, to, days])
+  }, [analysis.dateRows, from, to, rangeDaysAsc.length])
 
   const q = deferredSearch.trim().toLowerCase()
 
@@ -448,10 +477,15 @@ export default function RevenueSharingDashboard() {
         if (!inRange.length) return null
         const total = toFixed2(inRange.reduce((s, d) => s + safeNum(d.earning), 0))
         if (total <= 0) return null
+        const byDay = {}
+        for (const d of inRange) {
+          byDay[d.date] = { earning: d.earning, impressions: d.impressions }
+        }
         return {
           ...row,
           total,
           days: inRange,
+          byDay,
           dayCount: inRange.length,
         }
       })
@@ -470,6 +504,8 @@ export default function RevenueSharingDashboard() {
     if (!q) return selectedDay.rows
     return selectedDay.rows.filter((row) => row.email.toLowerCase().includes(q))
   }, [selectedDay.rows, q])
+
+  const showDayCols = rangeDaysAsc.length > 0 && rangeDaysAsc.length <= 14
 
   const avgPerPaidDay =
     rangeStats.paidDays > 0 ? toFixed2(rangeStats.total / rangeStats.paidDays) : 0
@@ -502,8 +538,8 @@ export default function RevenueSharingDashboard() {
             </span>
           </h1>
           <p>
-            Last {RANGE_DAYS} days — har date pe kitne dollar user ko share kiye. Dollar ke saath ₹
-            brackets me (1$ = ₹{USD_TO_INR}). Lightweight load: pehle earning filter, phir daily.
+            Latest <strong>{DEFAULT_VIEW_DAYS} days</strong> — har date pe har mail ki shared earning
+            ($ + ₹, 1$ = ₹{USD_TO_INR}). By Mail me date columns, By Date me us din ke saare mails.
             {loading && progress
               ? ` · ${progress.phase === 'filter' ? 'filter' : 'daily'} ${formatInt(progress.loaded)} / ${formatInt(progress.total)}`
               : ''}
@@ -540,7 +576,7 @@ export default function RevenueSharingDashboard() {
           />
         </label>
         <div className="rev-share__presets">
-          <button type="button" onClick={() => setPreset(7)}>
+          <button type="button" className="on" onClick={() => setPreset(7)}>
             7d
           </button>
           <button type="button" onClick={() => setPreset(30)}>
@@ -567,7 +603,7 @@ export default function RevenueSharingDashboard() {
           </small>
         </div>
         <div className="rev-share__kpi-card">
-          <span>Users in range</span>
+          <span>Mails in range</span>
           <strong>{ready ? formatInt(rangeStats.users) : '…'}</strong>
           <small>{formatInt(rangeStats.paidDays)} days with payout</small>
         </div>
@@ -575,7 +611,7 @@ export default function RevenueSharingDashboard() {
           <span>Focus day</span>
           <strong>{formatUsdInr(selectedDay.total)}</strong>
           <small>
-            {formatDayLabel(selectedDate)} · {formatInt(selectedDay.users)} users
+            {formatDayLabel(selectedDate)} · {formatInt(selectedDay.users)} mails
           </small>
         </div>
         <div className="rev-share__kpi-card">
@@ -583,28 +619,23 @@ export default function RevenueSharingDashboard() {
           <strong>{ready ? formatUsdInr(avgPerPaidDay) : '…'}</strong>
           <small>inside selected range</small>
         </div>
-        <div className="rev-share__kpi-card">
-          <span>Full {RANGE_DAYS}-day</span>
-          <strong>{ready ? formatUsdInr(analysis.grandTotal) : '…'}</strong>
-          <small>{formatInt(analysis.paidUserCount)} users all-time in window</small>
-        </div>
       </div>
 
       <div className="rev-share__toolbar">
         <div className="rev-share__tabs">
           <button
             type="button"
+            className={view === 'users' ? 'on' : ''}
+            onClick={() => setView('users')}
+          >
+            By Mail
+          </button>
+          <button
+            type="button"
             className={view === 'dates' ? 'on' : ''}
             onClick={() => setView('dates')}
           >
             By Date
-          </button>
-          <button
-            type="button"
-            className={view === 'users' ? 'on' : ''}
-            onClick={() => setView('users')}
-          >
-            By User
           </button>
         </div>
         <label className="rev-share__search">
@@ -613,7 +644,7 @@ export default function RevenueSharingDashboard() {
             type="search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="uttam… or 2026-10-13"
+            placeholder="uttam… or 2026-10-22"
           />
         </label>
         <label className="rev-share__date">
@@ -660,7 +691,83 @@ export default function RevenueSharingDashboard() {
         ) : null}
       </div>
 
-      {view === 'dates' ? (
+      {view === 'users' ? (
+        <section className="rev-share__panel full">
+          <h2>
+            Har mail · date-wise ({formatInt(rangeDaysAsc.length)} days)
+            <small>
+              {formatInt(filteredUserRows.length)} mails · {formatUsdInr(rangeStats.total)}
+            </small>
+          </h2>
+          <div className="rev-share__table-wrap rev-share__table-wrap--wide">
+            <table className="rev-share__table rev-share__table--mail-days">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Email</th>
+                  {showDayCols
+                    ? rangeDaysAsc.map((d) => (
+                        <th key={d} title={d}>
+                          {shortDayLabel(d)}
+                          <em>{weekdayLabel(d)}</em>
+                        </th>
+                      ))
+                    : null}
+                  <th>Days</th>
+                  <th>Total ($ / ₹)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {!ready && !filteredUserRows.length ? (
+                  <tr>
+                    <td colSpan={showDayCols ? 5 + rangeDaysAsc.length : 5} className="rev-share__empty">
+                      Mails load ho rahe hain…
+                    </td>
+                  </tr>
+                ) : null}
+                {!filteredUserRows.length && ready && !loading ? (
+                  <tr>
+                    <td colSpan={showDayCols ? 5 + rangeDaysAsc.length : 5} className="rev-share__empty">
+                      Is range me koi shared earning nahi mili.
+                    </td>
+                  </tr>
+                ) : null}
+                {filteredUserRows.map((row, i) => (
+                  <tr key={row.emailKey}>
+                    <td>{i + 1}</td>
+                    <td className="mail">{row.email}</td>
+                    {showDayCols
+                      ? rangeDaysAsc.map((d) => {
+                          const cell = row.byDay?.[d]
+                          const earn = safeNum(cell?.earning)
+                          return (
+                            <td
+                              key={d}
+                              className={'num day-cell' + (earn > 0 ? ' has' : '')}
+                              title={earn > 0 ? `${d}: ${formatUsdInr(earn)}` : d}
+                              onClick={() => {
+                                setSelectedDate(d)
+                                setView('dates')
+                              }}
+                            >
+                              {earn > 0 ? formatUsd(earn) : '—'}
+                            </td>
+                          )
+                        })
+                      : null}
+                    <td className="num">{formatInt(row.dayCount)}</td>
+                    <td className="num strong">{formatUsdInr(row.total)}</td>
+                    <td>
+                      <Link to="/mail">Mail</Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : (
         <div className="rev-share__split">
           <section className="rev-share__panel">
             <h2>
@@ -675,7 +782,7 @@ export default function RevenueSharingDashboard() {
                   <tr>
                     <th>Date</th>
                     <th>Day</th>
-                    <th>Users</th>
+                    <th>Mails</th>
                     <th>Shared ($ / ₹)</th>
                   </tr>
                 </thead>
@@ -709,9 +816,9 @@ export default function RevenueSharingDashboard() {
 
           <section className="rev-share__panel">
             <h2>
-              {formatDayLabel(selectedDate)} — user breakdown
+              {formatDayLabel(selectedDate)} — har mail
               <small>
-                {formatUsdInr(selectedDay.total)} · {formatInt(selectedDayFiltered.length)} users
+                {formatUsdInr(selectedDay.total)} · {formatInt(selectedDayFiltered.length)} mails
               </small>
             </h2>
             <div className="rev-share__table-wrap">
@@ -730,7 +837,7 @@ export default function RevenueSharingDashboard() {
                     <tr>
                       <td colSpan={5} className="rev-share__empty">
                         {loading
-                          ? 'Load chal raha hai — thodi der me users aayenge…'
+                          ? 'Load chal raha hai — thodi der me mails aayenge…'
                           : 'Is date pe koi earning share nahi hai.'}
                       </td>
                     </tr>
@@ -752,64 +859,6 @@ export default function RevenueSharingDashboard() {
             </div>
           </section>
         </div>
-      ) : (
-        <section className="rev-share__panel full">
-          <h2>
-            Users — range total
-            <small>
-              {formatInt(filteredUserRows.length)} users · {formatUsdInr(rangeStats.total)}
-            </small>
-          </h2>
-          <div className="rev-share__table-wrap">
-            <table className="rev-share__table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Email</th>
-                  <th>Days paid</th>
-                  <th>Total shared ($ / ₹)</th>
-                  <th>Latest day</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {!ready && !filteredUserRows.length ? (
-                  <tr>
-                    <td colSpan={6} className="rev-share__empty">
-                      Users load ho rahe hain…
-                    </td>
-                  </tr>
-                ) : null}
-                {!filteredUserRows.length && ready && !loading ? (
-                  <tr>
-                    <td colSpan={6} className="rev-share__empty">
-                      Is range me koi shared earning nahi mili.
-                    </td>
-                  </tr>
-                ) : null}
-                {filteredUserRows.map((row, i) => {
-                  const latest = row.days[0]
-                  return (
-                    <tr key={row.emailKey}>
-                      <td>{i + 1}</td>
-                      <td className="mail">{row.email}</td>
-                      <td className="num">{formatInt(row.dayCount)}</td>
-                      <td className="num strong">{formatUsdInr(row.total)}</td>
-                      <td>
-                        {latest
-                          ? `${formatDayLabel(latest.date)} · ${formatUsdInr(latest.earning)}`
-                          : '—'}
-                      </td>
-                      <td>
-                        <Link to="/mail">Mail</Link>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
       )}
     </div>
   )
