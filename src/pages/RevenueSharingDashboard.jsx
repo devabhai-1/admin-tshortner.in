@@ -5,23 +5,21 @@ import { formatInt, formatInr, formatUsd, usdToInr } from '../lib/formatMoney.js
 import {
   decodeEmailKey,
   getEarningFromRow,
-  readDailyMap,
+  normalizeDailyRow,
   safeNum,
   toFixed2,
 } from '../lib/tshortnerSchema.js'
 import './RevenueSharingDashboard.css'
 
-/** Load/window max — UI default latest 7 days */
 const RANGE_DAYS = 90
 const DEFAULT_VIEW_DAYS = 7
-/** 1 USD = 93 INR */
 const USD_TO_INR = 93
 const FB_BASE =
   import.meta.env.VITE_FIREBASE_DATABASE_URL ||
   'https://tshortner-in-default-rtdb.asia-southeast1.firebasedatabase.app'
-const CACHE_KEY = 'tshortner.admin.revenueShare.v2'
+const CACHE_KEY = 'tshortner.admin.revenueShare.v3'
 const FETCH_CONCURRENCY = 48
-const FETCH_TIMEOUT_MS = 8000
+const FETCH_TIMEOUT_MS = 12000
 
 function formatUsdInr(n) {
   return `${formatUsd(n)} (${formatInr(usdToInr(n, USD_TO_INR))})`
@@ -104,7 +102,22 @@ function emptyAnalysis(days) {
     paidUserCount: 0,
     paidDayCount: 0,
     scannedUsers: 0,
+    paidKeys: [],
   }
+}
+
+/** Merge daily maps — higher earning wins if both paths have same date */
+function mergeDailyMaps(primary, secondary) {
+  const out = { ...(secondary || {}) }
+  for (const [date, row] of Object.entries(primary || {})) {
+    const a = normalizeDailyRow(row)
+    const b = normalizeDailyRow(out[date])
+    const aEarn = getEarningFromRow(a)
+    const bEarn = getEarningFromRow(b)
+    if (!out[date] || aEarn >= bEarn) out[date] = a
+    else out[date] = b
+  }
+  return out
 }
 
 function buildAnalysis(userDailyList, days, daySet) {
@@ -126,21 +139,26 @@ function buildAnalysis(userDailyList, days, daySet) {
 
     for (const [date, rawRow] of Object.entries(daily || {})) {
       if (!daySet.has(date)) continue
-      const earn = toFixed2(getEarningFromRow(rawRow))
-      const imps = safeNum(rawRow?.impressions)
-      if (earn <= 0 && imps <= 0) continue
-      if (earn > 0) {
-        userTotal += earn
-        userDays.push({ date, earning: earn, impressions: imps, cpm: safeNum(rawRow?.cpm) })
-        byDayEarn[date] = { earning: earn, impressions: imps }
-        const bucket = byDate.get(date)
-        if (bucket) {
-          bucket.total += earn
-          bucket.users += 1
-          bucket.rows.push({ email, emailKey, earning: earn, impressions: imps })
-        }
-      } else if (imps > 0) {
-        byDayEarn[date] = { earning: 0, impressions: imps }
+      const row = normalizeDailyRow(rawRow)
+      const earn = toFixed2(getEarningFromRow(row))
+      const imps = safeNum(row.impressions)
+      if (earn <= 0) continue
+
+      userTotal += earn
+      userDays.push({ date, earning: earn, impressions: imps, cpm: safeNum(row.cpm) })
+      byDayEarn[date] = { earning: earn, impressions: imps, cpm: safeNum(row.cpm) }
+
+      const bucket = byDate.get(date)
+      if (bucket) {
+        bucket.total += earn
+        bucket.users += 1
+        bucket.rows.push({
+          email,
+          emailKey,
+          earning: earn,
+          impressions: imps,
+          cpm: safeNum(row.cpm),
+        })
       }
     }
 
@@ -165,12 +183,7 @@ function buildAnalysis(userDailyList, days, daySet) {
       const total = toFixed2(bucket?.total || 0)
       const rows = (bucket?.rows || []).slice().sort((a, b) => b.earning - a.earning)
       if (total > 0) paidDayCount += 1
-      return {
-        date,
-        total,
-        users: bucket?.users || 0,
-        rows,
-      }
+      return { date, total, users: bucket?.users || 0, rows }
     })
     .reverse()
 
@@ -188,11 +201,8 @@ async function fetchJson(url, parentSignal) {
   const ac = new AbortController()
   const onAbort = () => ac.abort()
   if (parentSignal) {
-    if (parentSignal.aborted) {
-      ac.abort()
-    } else {
-      parentSignal.addEventListener('abort', onAbort, { once: true })
-    }
+    if (parentSignal.aborted) ac.abort()
+    else parentSignal.addEventListener('abort', onAbort, { once: true })
   }
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS)
   try {
@@ -219,74 +229,88 @@ async function mapPool(items, concurrency, fn, signal) {
   await Promise.all(Array.from({ length: n }, () => worker()))
 }
 
-/** Earning wale users → dashboard daily (+ legacy dailyStats) */
-async function loadUserDailyMaps(preferredKeys, onProgress, signal) {
-  let keys = Array.isArray(preferredKeys) ? preferredKeys.filter(Boolean) : []
-  let totalKeys = keys.length
-
-  if (!keys.length) {
-    const keysObj = await fetchJson(`${FB_BASE}/users.json?shallow=true`, signal)
-    const allKeys = Object.keys(keysObj || {})
-    totalKeys = allKeys.length
-    const paid = []
-    let scanned = 0
-    await mapPool(
-      allKeys,
-      60,
-      async (emailKey) => {
-        try {
-          const te = await fetchJson(
-            `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard/totalEarning.json`,
-            signal,
-          )
-          if (safeNum(te) > 0) paid.push(emailKey)
-        } catch {
-          /* skip */
-        }
-        scanned += 1
-        if (scanned % 80 === 0 || scanned === allKeys.length) {
-          onProgress({
-            phase: 'filter',
-            loaded: scanned,
-            total: allKeys.length,
-            usersWithDaily: paid.length,
-            list: [],
-          })
-        }
-      },
-      signal,
-    )
-    keys = paid
+function dailyRangeUrl(emailKey, from, to) {
+  const base = `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard`
+  const q = `orderBy=${encodeURIComponent('"$key"')}&startAt=${encodeURIComponent(`"${from}"`)}&endAt=${encodeURIComponent(`"${to}"`)}`
+  return {
+    daily: `${base}/daily.json?${q}`,
+    dailyStats: `${base}/dailyStats.json?${q}`,
+    oneDay: (date) => `${base}/daily/${date}.json`,
   }
+}
+
+/** Paid users → sirf date-range daily (exact path, full dump nahi) */
+async function loadUserDailyMaps(from, to, onProgress, signal) {
+  const keysObj = await fetchJson(`${FB_BASE}/users.json?shallow=true`, signal)
+  const allKeys = Object.keys(keysObj || {})
+  const paid = []
+  let scanned = 0
+  await mapPool(
+    allKeys,
+    60,
+    async (emailKey) => {
+      try {
+        const te = await fetchJson(
+          `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard/totalEarning.json`,
+          signal,
+        )
+        if (safeNum(te) > 0) paid.push(emailKey)
+      } catch {
+        /* skip */
+      }
+      scanned += 1
+      if (scanned % 80 === 0 || scanned === allKeys.length) {
+        onProgress({
+          phase: 'filter',
+          loaded: scanned,
+          total: allKeys.length,
+          usersWithDaily: paid.length,
+          list: [],
+        })
+      }
+    },
+    signal,
+  )
 
   const out = []
   let done = 0
   await mapPool(
-    keys,
+    paid,
     FETCH_CONCURRENCY,
     async (emailKey) => {
       try {
-        const dash = await fetchJson(
-          `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard.json`,
-          signal,
-        )
-        const daily = readDailyMap(dash)
-        if (daily && Object.keys(daily).length) {
+        const urls = dailyRangeUrl(emailKey, from, to)
+        let daily = {}
+        let stats = {}
+        try {
+          daily = (await fetchJson(urls.daily, signal)) || {}
+        } catch {
+          daily = {}
+        }
+        try {
+          stats = (await fetchJson(urls.dailyStats, signal)) || {}
+        } catch {
+          stats = {}
+        }
+        if (typeof daily !== 'object' || Array.isArray(daily)) daily = {}
+        if (typeof stats !== 'object' || Array.isArray(stats)) stats = {}
+        const merged = mergeDailyMaps(daily, stats)
+        if (Object.keys(merged).length) {
           out.push({
             emailKey,
             email: decodeEmailKey(emailKey),
-            daily,
+            daily: merged,
           })
         }
       } catch {
-        /* skip failed user */
+        /* skip */
       }
       done += 1
-      if (done % 20 === 0 || done === keys.length) {
+      if (done % 20 === 0 || done === paid.length) {
         onProgress({
           phase: 'daily',
           loaded: done,
-          total: keys.length,
+          total: paid.length,
           usersWithDaily: out.length,
           list: out,
         })
@@ -295,22 +319,69 @@ async function loadUserDailyMaps(preferredKeys, onProgress, signal) {
     signal,
   )
 
-  return { list: out, totalKeys: totalKeys || keys.length, paidKeys: keys.length }
+  return { list: out, totalKeys: allKeys.length, paidKeys: paid }
+}
+
+/** Focus date — har mail ka us din ka row seedha daily/{date} se (source of truth) */
+async function loadExactDayRows(paidKeys, date, signal) {
+  const rows = []
+  await mapPool(
+    paidKeys,
+    FETCH_CONCURRENCY,
+    async (emailKey) => {
+      try {
+        const urls = dailyRangeUrl(emailKey, date, date)
+        let row = await fetchJson(urls.oneDay(date), signal)
+        if (!row || typeof row !== 'object') {
+          // legacy path
+          try {
+            row = await fetchJson(
+              `${FB_BASE}/users/${encodeURIComponent(emailKey)}/dashboard/dailyStats/${date}.json`,
+              signal,
+            )
+          } catch {
+            row = null
+          }
+        }
+        if (!row || typeof row !== 'object') return
+        const norm = normalizeDailyRow(row)
+        const earn = toFixed2(getEarningFromRow(norm))
+        if (earn <= 0) return
+        rows.push({
+          email: decodeEmailKey(emailKey),
+          emailKey,
+          earning: earn,
+          impressions: safeNum(norm.impressions),
+          cpm: safeNum(norm.cpm),
+        })
+      } catch {
+        /* skip */
+      }
+    },
+    signal,
+  )
+  rows.sort((a, b) => b.earning - a.earning)
+  const total = toFixed2(rows.reduce((s, r) => s + r.earning, 0))
+  return { date, total, users: rows.length, rows }
 }
 
 export default function RevenueSharingDashboard() {
   const days = useMemo(() => buildLastNDays(RANGE_DAYS), [])
   const daySet = useMemo(() => new Set(days), [days])
   const today = days[days.length - 1] || isoTodayKolkata()
+  const windowFrom = days[0] || today
 
   const cached = useMemo(() => readCache(today), [today])
   const [analysis, setAnalysis] = useState(() => cached || emptyAnalysis(days))
+  const [paidKeys, setPaidKeys] = useState(() => cached?.paidKeys || [])
   const [ready, setReady] = useState(() => !!cached)
   const [loading, setLoading] = useState(() => !cached)
+  const [dayLoading, setDayLoading] = useState(false)
   const [progress, setProgress] = useState(null)
   const [error, setError] = useState('')
   const [lastSync, setLastSync] = useState(() => cached?.t || null)
   const [fromCache, setFromCache] = useState(() => !!cached)
+  const [dayVerified, setDayVerified] = useState(false)
 
   const [selectedDate, setSelectedDate] = useState(today)
   const [rangeFrom, setRangeFrom] = useState(() => addDaysIso(today, -(DEFAULT_VIEW_DAYS - 1)))
@@ -320,6 +391,7 @@ export default function RevenueSharingDashboard() {
   const [sortUsers, setSortUsers] = useState('earn')
   const deferredSearch = useDeferredValue(search)
   const abortRef = useRef(null)
+  const dayAbortRef = useRef(null)
   const runIdRef = useRef(0)
 
   const minDay = days[0] || today
@@ -346,7 +418,6 @@ export default function RevenueSharingDashboard() {
   const setPreset = (n) => {
     setRangeFrom(clampDate(addDaysIso(today, -(n - 1))))
     setRangeTo(today)
-    setSelectedDate(today)
   }
 
   const runLoad = (force = false) => {
@@ -357,6 +428,7 @@ export default function RevenueSharingDashboard() {
 
     setLoading(true)
     setError('')
+    setDayVerified(false)
     if (!force && cached) {
       setFromCache(true)
       setReady(true)
@@ -367,8 +439,9 @@ export default function RevenueSharingDashboard() {
 
     void (async () => {
       try {
-        const { list, totalKeys, paidKeys } = await loadUserDailyMaps(
-          [],
+        const { list, totalKeys, paidKeys: keys } = await loadUserDailyMaps(
+          windowFrom,
+          today,
           (p) => {
             if (runId !== runIdRef.current) return
             setProgress({
@@ -396,14 +469,23 @@ export default function RevenueSharingDashboard() {
         if (runId !== runIdRef.current) return
 
         const next = buildAnalysis(list, days, daySet)
-        next.scannedUsers = totalKeys || paidKeys
+        next.scannedUsers = totalKeys || keys.length
+        next.paidKeys = keys
+        setPaidKeys(keys)
         setAnalysis(next)
         setReady(true)
         setFromCache(false)
         const t = Date.now()
         setLastSync(t)
-        writeCache({ today, t, ...next })
+        writeCache({ today, t, paidKeys: keys, ...next })
         setProgress(null)
+
+        // Agar focus day empty hai to last paid day select
+        const focusTotal = next.dateRows.find((r) => r.date === selectedDate)?.total || 0
+        const lastPaid = next.dateRows.find((r) => r.total > 0)
+        if (lastPaid && focusTotal <= 0) {
+          setSelectedDate(lastPaid.date)
+        }
       } catch (err) {
         if (runId !== runIdRef.current) return
         if (err?.name === 'AbortError') return
@@ -414,11 +496,56 @@ export default function RevenueSharingDashboard() {
     })()
   }
 
+  /** Focus date — Firebase se dubara exact daily/{date} */
+  const verifySelectedDay = (date, keys) => {
+    dayAbortRef.current?.abort()
+    const ac = new AbortController()
+    dayAbortRef.current = ac
+    const keyList = keys?.length ? keys : paidKeys
+    if (!date || !keyList.length) return
+
+    setDayLoading(true)
+    setDayVerified(false)
+    void (async () => {
+      try {
+        const dayRow = await loadExactDayRows(keyList, date, ac.signal)
+        if (ac.signal.aborted) return
+        setAnalysis((prev) => {
+          const dateRows = prev.dateRows.map((r) => (r.date === date ? dayRow : r))
+          // sync user byDay for this date
+          const userRows = prev.userRows.map((u) => {
+            const hit = dayRow.rows.find((x) => x.emailKey === u.emailKey)
+            const byDay = { ...(u.byDay || {}) }
+            if (hit) byDay[date] = { earning: hit.earning, impressions: hit.impressions, cpm: hit.cpm }
+            else delete byDay[date]
+            const daysList = Object.entries(byDay)
+              .map(([d, v]) => ({
+                date: d,
+                earning: v.earning,
+                impressions: v.impressions,
+                cpm: v.cpm || 0,
+              }))
+              .sort((a, b) => (a.date < b.date ? 1 : -1))
+            const total = toFixed2(daysList.reduce((s, d) => s + safeNum(d.earning), 0))
+            return { ...u, byDay, days: daysList, dayCount: daysList.length, total }
+          })
+          return { ...prev, dateRows, userRows: userRows.sort((a, b) => b.total - a.total) }
+        })
+        setDayVerified(true)
+      } catch (err) {
+        if (err?.name === 'AbortError') return
+      } finally {
+        if (!ac.signal.aborted) setDayLoading(false)
+      }
+    })()
+  }
+
   useEffect(() => {
     runLoad(false)
     return () => {
       runIdRef.current += 1
       abortRef.current?.abort()
+      dayAbortRef.current?.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [today])
@@ -426,6 +553,12 @@ export default function RevenueSharingDashboard() {
   useEffect(() => {
     if (selectedDate < from || selectedDate > to) setSelectedDate(to)
   }, [from, to, selectedDate])
+
+  useEffect(() => {
+    if (!ready || !paidKeys.length || !selectedDate) return
+    verifySelectedDay(selectedDate, paidKeys)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, ready, paidKeys])
 
   const selectedDay = useMemo(() => {
     return (
@@ -479,24 +612,19 @@ export default function RevenueSharingDashboard() {
         if (total <= 0) return null
         const byDay = {}
         for (const d of inRange) {
-          byDay[d.date] = { earning: d.earning, impressions: d.impressions }
+          byDay[d.date] = {
+            earning: d.earning,
+            impressions: d.impressions,
+            cpm: d.cpm,
+          }
         }
-        return {
-          ...row,
-          total,
-          days: inRange,
-          byDay,
-          dayCount: inRange.length,
-        }
+        return { ...row, total, days: inRange, byDay, dayCount: inRange.length }
       })
       .filter(Boolean)
 
     if (q) list = list.filter((row) => row.email.toLowerCase().includes(q))
-    if (sortUsers === 'email') {
-      list = list.slice().sort((a, b) => a.email.localeCompare(b.email))
-    } else {
-      list = list.slice().sort((a, b) => b.total - a.total)
-    }
+    if (sortUsers === 'email') list = list.slice().sort((a, b) => a.email.localeCompare(b.email))
+    else list = list.slice().sort((a, b) => b.total - a.total)
     return list
   }, [analysis.userRows, from, to, q, sortUsers])
 
@@ -506,10 +634,8 @@ export default function RevenueSharingDashboard() {
   }, [selectedDay.rows, q])
 
   const showDayCols = rangeDaysAsc.length > 0 && rangeDaysAsc.length <= 14
-
   const avgPerPaidDay =
     rangeStats.paidDays > 0 ? toFixed2(rangeStats.total / rangeStats.paidDays) : 0
-
   const pct =
     progress && progress.total
       ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
@@ -530,16 +656,20 @@ export default function RevenueSharingDashboard() {
             >
               {loading
                 ? `⟳ ${pct}%`
-                : ready
-                  ? fromCache
-                    ? '● Cache'
-                    : '● Ready'
-                  : '○ …'}
+                : dayLoading
+                  ? '⟳ Day'
+                  : ready
+                    ? fromCache
+                      ? '● Cache'
+                      : '● Ready'
+                    : '○ …'}
             </span>
           </h1>
           <p>
-            Latest <strong>{DEFAULT_VIEW_DAYS} days</strong> — har date pe har mail ki shared earning
-            ($ + ₹, 1$ = ₹{USD_TO_INR}). By Mail me date columns, By Date me us din ke saare mails.
+            Har mail ka <strong>usi din</strong> ka amount Firebase se:{' '}
+            <code>users/…/dashboard/daily/YYYY-MM-DD</code>. Default latest {DEFAULT_VIEW_DAYS}{' '}
+            days. Focus date pe exact re-fetch hota hai
+            {dayVerified ? ' · ✓ day verified' : ''}.
             {loading && progress
               ? ` · ${progress.phase === 'filter' ? 'filter' : 'daily'} ${formatInt(progress.loaded)} / ${formatInt(progress.total)}`
               : ''}
@@ -576,7 +706,7 @@ export default function RevenueSharingDashboard() {
           />
         </label>
         <div className="rev-share__presets">
-          <button type="button" className="on" onClick={() => setPreset(7)}>
+          <button type="button" onClick={() => setPreset(7)}>
             7d
           </button>
           <button type="button" onClick={() => setPreset(30)}>
@@ -608,10 +738,11 @@ export default function RevenueSharingDashboard() {
           <small>{formatInt(rangeStats.paidDays)} days with payout</small>
         </div>
         <div className="rev-share__kpi-card ok">
-          <span>Focus day</span>
-          <strong>{formatUsdInr(selectedDay.total)}</strong>
+          <span>Focus day (exact)</span>
+          <strong>{dayLoading ? '…' : formatUsdInr(selectedDay.total)}</strong>
           <small>
             {formatDayLabel(selectedDate)} · {formatInt(selectedDay.users)} mails
+            {dayVerified ? ' · verified' : ''}
           </small>
         </div>
         <div className="rev-share__kpi-card">
@@ -684,6 +815,14 @@ export default function RevenueSharingDashboard() {
         >
           {loading ? 'Loading…' : 'Refresh'}
         </button>
+        <button
+          type="button"
+          className="rev-share__refresh"
+          onClick={() => verifySelectedDay(selectedDate, paidKeys)}
+          disabled={dayLoading || !paidKeys.length}
+        >
+          {dayLoading ? 'Checking…' : 'Re-check day'}
+        </button>
         {lastSync ? (
           <span className="rev-share__sync">
             Synced {new Date(lastSync).toLocaleTimeString('en-IN')}
@@ -721,14 +860,20 @@ export default function RevenueSharingDashboard() {
               <tbody>
                 {!ready && !filteredUserRows.length ? (
                   <tr>
-                    <td colSpan={showDayCols ? 5 + rangeDaysAsc.length : 5} className="rev-share__empty">
+                    <td
+                      colSpan={showDayCols ? 5 + rangeDaysAsc.length : 5}
+                      className="rev-share__empty"
+                    >
                       Mails load ho rahe hain…
                     </td>
                   </tr>
                 ) : null}
                 {!filteredUserRows.length && ready && !loading ? (
                   <tr>
-                    <td colSpan={showDayCols ? 5 + rangeDaysAsc.length : 5} className="rev-share__empty">
+                    <td
+                      colSpan={showDayCols ? 5 + rangeDaysAsc.length : 5}
+                      className="rev-share__empty"
+                    >
                       Is range me koi shared earning nahi mili.
                     </td>
                   </tr>
@@ -745,7 +890,11 @@ export default function RevenueSharingDashboard() {
                             <td
                               key={d}
                               className={'num day-cell' + (earn > 0 ? ' has' : '')}
-                              title={earn > 0 ? `${d}: ${formatUsdInr(earn)}` : d}
+                              title={
+                                earn > 0
+                                  ? `${d}: ${formatUsdInr(earn)} · imps ${formatInt(cell?.impressions || 0)}`
+                                  : d
+                              }
                               onClick={() => {
                                 setSelectedDate(d)
                                 setView('dates')
@@ -816,9 +965,11 @@ export default function RevenueSharingDashboard() {
 
           <section className="rev-share__panel">
             <h2>
-              {formatDayLabel(selectedDate)} — har mail
+              {formatDayLabel(selectedDate)} — har mail (exact day)
               <small>
-                {formatUsdInr(selectedDay.total)} · {formatInt(selectedDayFiltered.length)} mails
+                {dayLoading ? 're-checking…' : formatUsdInr(selectedDay.total)} ·{' '}
+                {formatInt(selectedDayFiltered.length)} mails
+                {dayVerified ? ' · ✓' : ''}
               </small>
             </h2>
             <div className="rev-share__table-wrap">
@@ -828,17 +979,25 @@ export default function RevenueSharingDashboard() {
                     <th>#</th>
                     <th>Email</th>
                     <th>Impressions</th>
+                    <th>CPM</th>
                     <th>Shared ($ / ₹)</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {!selectedDayFiltered.length ? (
+                  {dayLoading && !selectedDayFiltered.length ? (
                     <tr>
-                      <td colSpan={5} className="rev-share__empty">
+                      <td colSpan={6} className="rev-share__empty">
+                        Is din ka exact data Firebase se aa raha hai…
+                      </td>
+                    </tr>
+                  ) : null}
+                  {!selectedDayFiltered.length && !dayLoading ? (
+                    <tr>
+                      <td colSpan={6} className="rev-share__empty">
                         {loading
-                          ? 'Load chal raha hai — thodi der me mails aayenge…'
-                          : 'Is date pe koi earning share nahi hai.'}
+                          ? 'Load chal raha hai…'
+                          : 'Is date pe koi earning share nahi hai (daily/YYYY-MM-DD empty).'}
                       </td>
                     </tr>
                   ) : (
@@ -847,6 +1006,7 @@ export default function RevenueSharingDashboard() {
                         <td>{i + 1}</td>
                         <td className="mail">{row.email}</td>
                         <td className="num">{formatInt(row.impressions)}</td>
+                        <td className="num">{formatUsd(row.cpm || 0)}</td>
                         <td className="num">{formatUsdInr(row.earning)}</td>
                         <td>
                           <Link to="/mail">Mail</Link>
