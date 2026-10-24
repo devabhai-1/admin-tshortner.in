@@ -429,31 +429,94 @@ export default function PagesDashboard() {
   const totals = data?.totals
   const rows = data?.rows || []
   const mailSearch = mailQuery.trim().toLowerCase()
-  /** Views base = mail rows sum. Earnings = your AdSense/AdX total allocated by views (GA4 revenue ₹0). */
+  /** Views + GA4 page revenue (neeche page table jaisa). Manual total optional override. */
   const mailAgg = useMemo(() => {
     let pages = 0
     let views = 0
     let activeUsers = 0
     let linkedViews = 0
+    let gaRevenue = 0
+    let linkedGaRevenue = 0
     for (const row of mailRows) {
       pages += Number(row.pages) || 0
       const v = Number(row.views) || 0
+      const rev = Number(row.totalRevenue) || 0
       views += v
+      gaRevenue += rev
       activeUsers += Number(row.activeUsers) || 0
-      if (row.email !== UNLINKED) linkedViews += v
+      if (row.email !== UNLINKED) {
+        linkedViews += v
+        linkedGaRevenue += rev
+      }
     }
     return {
       pages,
       views: Math.round(views),
       linkedViews: Math.round(linkedViews),
       activeUsers: Math.round(activeUsers),
+      gaRevenue: Math.round(gaRevenue * 100) / 100,
+      linkedGaRevenue: Math.round(linkedGaRevenue * 100) / 100,
     }
   }, [mailRows])
 
-  const alloc = useMemo(
-    () => allocateByViews(mailRows, totalEarnInr, totalImpsIn),
-    [mailRows, totalEarnInr, totalImpsIn],
-  )
+  const manualOverride = Number(totalEarnInr) > 0
+  const alloc = useMemo(() => {
+    if (manualOverride) {
+      return {
+        ...allocateByViews(mailRows, totalEarnInr, totalImpsIn),
+        mode: 'manual',
+      }
+    }
+    // Default: GA4 totalRevenue per mail (same source as page table)
+    const linked = mailRows.filter((r) => r.email !== UNLINKED)
+    const linkedViews = linked.reduce((s, r) => s + (Number(r.views) || 0), 0)
+    const baseImps = Math.max(0, Number(totalImpsIn) || 0) || linkedViews
+    const byEmail = {}
+    let totalEarn = 0
+    for (const r of linked) {
+      const views = Number(r.views) || 0
+      const earnings = Math.round((Number(r.totalRevenue) || 0) * 100) / 100
+      totalEarn += earnings
+      const share = linkedViews > 0 ? views / linkedViews : 0
+      const impressions = baseImps > 0 && linkedViews > 0
+        ? Math.round(share * baseImps)
+        : views
+      byEmail[r.email] = {
+        views,
+        share,
+        earnings,
+        impressions,
+        cpm: impressions > 0 ? (earnings / impressions) * 1000 : 0,
+      }
+    }
+    // Fix impressions sum drift to baseImps
+    if (baseImps > 0 && linked.length) {
+      const sumImps = Object.values(byEmail).reduce((s, x) => s + x.impressions, 0)
+      let drift = Math.round(baseImps) - sumImps
+      const ordered = Object.values(byEmail).sort((a, b) => b.views - a.views)
+      let i = 0
+      while (drift !== 0 && ordered.length) {
+        const row = ordered[i % ordered.length]
+        if (drift > 0) {
+          row.impressions += 1
+          drift -= 1
+        } else if (row.impressions > 0) {
+          row.impressions -= 1
+          drift += 1
+        } else break
+        row.cpm = row.impressions > 0 ? (row.earnings / row.impressions) * 1000 : 0
+        i += 1
+        if (i > ordered.length * 3) break
+      }
+    }
+    return {
+      byEmail,
+      linkedViews,
+      baseImps,
+      totalEarn: Math.round(totalEarn * 100) / 100,
+      mode: 'ga4',
+    }
+  }, [mailRows, totalEarnInr, totalImpsIn, manualOverride])
 
   const mails = useMemo(() => {
     const MIN_VIEWS = 500
@@ -464,12 +527,13 @@ export default function PagesDashboard() {
       })
       .map((row) => {
         const a = alloc.byEmail[row.email]
+        const views = Number(row.views) || 0
         return {
           ...row,
           earn: a?.earnings ?? 0,
           imps: a?.impressions ?? 0,
           cpm: a?.cpm ?? 0,
-          share: a?.share ?? (mailAgg.views > 0 ? (Number(row.views) || 0) / mailAgg.views : 0),
+          share: a?.share ?? (mailAgg.linkedViews > 0 ? views / mailAgg.linkedViews : 0),
         }
       })
     return list.sort((a, b) => {
@@ -490,7 +554,7 @@ export default function PagesDashboard() {
       if (b.earn !== a.earn) return b.earn - a.earn
       return bViews - aViews
     })
-  }, [mailRows, mailSearch, mailSort, alloc, mailAgg.views])
+  }, [mailRows, mailSearch, mailSort, alloc, mailAgg.linkedViews])
   const rowCount = Number(data?.rowCount || mailTotal || 0)
   const pageCount = Math.max(1, Math.ceil(rowCount / pageSize))
   const mailDone = !mailLoading && mailRows.length > 0
@@ -499,7 +563,6 @@ export default function PagesDashboard() {
     mailDone && totals?.views != null
       ? Math.abs(Number(totals.views) - mailAgg.views) <= 1
       : null
-  const hasEarnInput = Number(totalEarnInr) > 0
 
   const applyRange = (start, end) => {
     setDraftStart(start)
@@ -576,12 +639,16 @@ export default function PagesDashboard() {
         {data?.mailWarning ? <p className="demo-error">{data.mailWarning}</p> : null}
         <div className="demo-toolbar">
           <label>
-            Total earnings (₹) — AdSense / AdX
+            Override total earnings (₹) — optional
             <input
               type="number"
               min="0"
               step="0.01"
-              placeholder="e.g. 14706.64"
+              placeholder={
+                mailAgg.linkedGaRevenue > 0
+                  ? `GA4 default ${mailAgg.linkedGaRevenue}`
+                  : 'e.g. 15140.44'
+              }
               value={totalEarnInr}
               onChange={(e) => setTotalEarnInr(e.target.value)}
             />
@@ -616,23 +683,31 @@ export default function PagesDashboard() {
           </label>
         </div>
         <p className="demo-note">
-          GA4 me revenue ₹0 hota hai (AdSense link nahi) — isliye kamai yahan <strong>aapke total</strong> se
-          linked-mail views ke hisaab se baanti jati hai. CPM = earning ÷ impressions × 1000.
-          Unlinked rows earning nahi leti.
+          {alloc.mode === 'ga4' ? (
+            <>
+              Default: har mail ki <strong>GA4 page revenue</strong> (neeche table jaisi). CPM = earning ÷
+              impressions × 1000. Override box bharoge to views-share se dubara baatega.
+            </>
+          ) : (
+            <>
+              Manual override on — kamai linked views share se. Clear karke GA4 revenue wapas.
+            </>
+          )}
+          {' '}
+          Unlinked earning nahi leti.
           {mailDone ? (
             <>
               {' '}
               · Linked views <strong>{fmtInt(mailAgg.linkedViews)}</strong>
               {' '}
-              · All views <strong>{fmtInt(mailAgg.views)}</strong>
-              {totals?.views != null ? (
+              · Mail GA4 earn <strong>{fmtInr(mailAgg.linkedGaRevenue)}</strong>
+              {totals?.totalRevenue != null ? (
                 <>
                   {' '}
-                  · GA4 <strong>{fmtInt(totals.views)}</strong>
-                  {viewsMatch === true ? ' · ✓' : viewsMatch === false ? ' · ⚠ partial' : ''}
+                  · Page-table total <strong>{fmtInr(totals.totalRevenue)}</strong>
                 </>
               ) : null}
-              {!hasEarnInput ? ' · ⚠ pehle Total earnings (₹) daalo' : null}
+              {viewsMatch === true ? ' · views ✓' : viewsMatch === false ? ' · ⚠ partial views' : ''}
             </>
           ) : null}
         </p>
@@ -654,7 +729,7 @@ export default function PagesDashboard() {
               {mailDone ? (
                 <tr className="demo-total">
                   <td />
-                  <td>Total (allocated)</td>
+                  <td>{alloc.mode === 'ga4' ? 'Total (GA4 revenue)' : 'Total (manual share)'}</td>
                   <td>{fmtInt(mailAgg.pages)}</td>
                   <td>{fmtInt(mailAgg.linkedViews)}</td>
                   <td>100%</td>
