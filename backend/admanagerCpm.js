@@ -181,11 +181,20 @@ async function loadCountryCpm({ credentials, db, networkCode, force }) {
     await writeCache(db, payload)
     return { ...payload, cached: false }
   } catch (err) {
+    const msg = friendlyError(err)
+    // Soft-fail: realtime page 502 mat do — purana cache ya empty CPM
     if (cached?.countries) {
-      return { ...cached, cached: true, error: friendlyError(err) }
+      return { ...cached, cached: true, error: msg }
     }
-    err.message = friendlyError(err)
-    throw err
+    return {
+      fetchedAt: Date.now(),
+      currency: 'INR',
+      range: 'LAST_7_DAYS',
+      network,
+      countries: {},
+      cached: false,
+      error: msg,
+    }
   }
 }
 

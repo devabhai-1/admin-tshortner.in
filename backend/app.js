@@ -1686,7 +1686,12 @@ app.get('/api/admanager/country-cpm', async (req, res) => {
   try {
     const credentials = loadGaCredentials()
     if (!credentials) {
-      return res.status(500).json({ error: 'Analytics service account missing' })
+      return res.json({
+        fetchedAt: Date.now(),
+        currency: 'INR',
+        countries: {},
+        error: 'Analytics service account missing',
+      })
     }
     const payload = await getCountryCpm({
       credentials,
@@ -1694,10 +1699,16 @@ app.get('/api/admanager/country-cpm', async (req, res) => {
       networkCode: process.env.AD_MANAGER_NETWORK_CODE || '23113214187',
       force: req.query.refresh === '1',
     })
+    // Always 200 — UI warning dikhayega; proxy 502 nahi
     return res.json(payload)
   } catch (e) {
     console.error(e)
-    return res.status(502).json({ error: e.message || 'Ad Manager CPM failed' })
+    return res.json({
+      fetchedAt: Date.now(),
+      currency: 'INR',
+      countries: {},
+      error: e.message || 'Ad Manager CPM failed',
+    })
   }
 })
 
