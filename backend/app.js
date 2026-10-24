@@ -1252,52 +1252,75 @@ async function runPagesReport(startDate, endDate, { limit, offset, q, metrics })
 }
 
 /**
- * Mail rollup — keep under Vercel ~60s:
- * 1) Top pages from GA4 (not all 27k)
- * 2) realtimeTraffic email map (1 request/day — fast)
- * 3) only a small OWNER_CACHE fill for leftover top codes
+ * Exact mail rollup for /pages.
+ * PAGES_MAIL_TOP_ROWS=0 → saari GA4 page rows (local accuracy).
+ * Default 800 → Vercel-safe top-N (partial warning).
  */
 async function fetchAllPagesForMails(startDate, endDate, q) {
   const metrics = ['screenPageViews', 'activeUsers', 'totalRevenue'];
-  const maxRows = Math.max(300, Math.min(1200, Number(process.env.PAGES_MAIL_TOP_ROWS || 800)));
-  const report = await runPagesReport(startDate, endDate, {
-    limit: maxRows,
-    offset: 0,
-    q,
-    metrics,
-  });
-  const metricNames = report._metricNames || metrics;
-  const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
-  const rowCount = Number(report.rowCount || 0);
-  const mappedRows = (report.rows || []).map((row) => ({
-    path: row.dimensionValues?.[0]?.value || '(not set)',
-    views: numMetric(row, idx.screenPageViews),
-    activeUsers: numMetric(row, idx.activeUsers),
-    totalRevenue: numMetric(row, idx.totalRevenue),
-  }));
+  const envTop = Number(process.env.PAGES_MAIL_TOP_ROWS);
+  const exact = Number.isFinite(envTop) && envTop <= 0;
+  const maxRows = exact
+    ? Math.max(1000, Number(process.env.PAGES_MAIL_HARD_CAP || 100000))
+    : Math.max(300, Math.min(5000, envTop || 800));
+  const maxMs = Math.max(
+    20000,
+    Number(process.env.PAGES_MAIL_MAX_MS || (exact ? 180000 : 50000)) || 50000,
+  );
+  const pageSize = 10000;
+  const started = Date.now();
+  let offset = 0;
+  let rowCount = 0;
+  let totalsRow = null;
+  let metricNames = metrics;
+  const mappedRows = [];
 
-  const totalsRow = report.totals?.[0];
-  const totals = totalsRow
-    ? {
-        path: 'Total',
-        views: numMetric(totalsRow, idx.screenPageViews),
-        activeUsers: numMetric(totalsRow, idx.activeUsers),
-        totalRevenue: numMetric(totalsRow, idx.totalRevenue),
-        viewsPerUser: 0,
-        avgEngagementTime: 0,
-        eventCount: 0,
-        keyEvents: 0,
-      }
-    : {
-        path: 'Total',
-        views: mappedRows.reduce((s, r) => s + r.views, 0),
-        activeUsers: mappedRows.reduce((s, r) => s + r.activeUsers, 0),
-        totalRevenue: mappedRows.reduce((s, r) => s + r.totalRevenue, 0),
-        viewsPerUser: 0,
-        avgEngagementTime: 0,
-        eventCount: 0,
-        keyEvents: 0,
-      };
+  while (Date.now() - started < maxMs && mappedRows.length < maxRows) {
+    const limitThis = Math.min(pageSize, maxRows - mappedRows.length);
+    const report = await runPagesReport(startDate, endDate, {
+      limit: limitThis,
+      offset,
+      q,
+      metrics,
+    });
+    metricNames = report._metricNames || metrics;
+    const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+    if (!totalsRow && report.totals?.[0]) totalsRow = report.totals[0];
+    rowCount = Number(report.rowCount || rowCount);
+    const batch = report.rows || [];
+    for (const row of batch) {
+      mappedRows.push({
+        path: row.dimensionValues?.[0]?.value || '(not set)',
+        views: numMetric(row, idx.screenPageViews),
+        activeUsers: numMetric(row, idx.activeUsers),
+        totalRevenue: numMetric(row, idx.totalRevenue),
+      });
+    }
+    offset += batch.length;
+    if (!batch.length || offset >= rowCount || batch.length < limitThis) break;
+  }
+
+  const idxT = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+  const summed = {
+    views: mappedRows.reduce((s, r) => s + r.views, 0),
+    activeUsers: mappedRows.reduce((s, r) => s + r.activeUsers, 0),
+    totalRevenue: mappedRows.reduce((s, r) => s + r.totalRevenue, 0),
+  };
+  // Property TOTAL jab complete; warna sirf loaded rows ka sum (share 100% match)
+  const complete = !rowCount || mappedRows.length >= rowCount;
+  const totals = {
+    path: 'Total',
+    views: complete && totalsRow ? numMetric(totalsRow, idxT.screenPageViews) : summed.views,
+    activeUsers: complete && totalsRow ? numMetric(totalsRow, idxT.activeUsers) : summed.activeUsers,
+    totalRevenue: complete && totalsRow ? numMetric(totalsRow, idxT.totalRevenue) : summed.totalRevenue,
+    viewsPerUser: 0,
+    avgEngagementTime: 0,
+    eventCount: 0,
+    keyEvents: 0,
+    rowsLoaded: mappedRows.length,
+    rowsExpected: rowCount,
+    rowsSumViews: summed.views,
+  };
 
   let mailWarning = '';
   let realtimeEmails = new Map();
@@ -1336,16 +1359,33 @@ async function fetchAllPagesForMails(startDate, endDate, q) {
     }
   }
 
-  // Highest-traffic unmatched only — avoid 2k Firebase HTTP fan-out (504)
   missing.sort((a, b) => b.views - a.views);
-  const toLookup = [...new Set(missing.map((m) => m.code))].slice(0, 120);
-  if (toLookup.length) {
+  const envOwnerCap = Number(process.env.PAGES_MAIL_OWNER_CAP);
+  const ownerUnlimited = exact && !(Number.isFinite(envOwnerCap) && envOwnerCap > 0);
+  const toLookup = ownerUnlimited
+    ? [...new Set(missing.map((m) => m.code))]
+    : [...new Set(missing.map((m) => m.code))].slice(
+        0,
+        Math.max(50, envOwnerCap || 120),
+      );
+  const lookupBudget = Math.min(
+    ownerUnlimited ? 90000 : 8000,
+    Math.max(0, maxMs - (Date.now() - started) - 2000),
+  );
+  if (toLookup.length && lookupBudget > 1500) {
     try {
-      await lookupOwners(toLookup, {
-        deadlineMs: 5000,
-        concurrency: 30,
-        fetchMs: 1800,
-      });
+      // Chunk so deadline covers more codes without one giant race
+      const chunk = 400;
+      for (let i = 0; i < toLookup.length && Date.now() - started < maxMs - 1500; i += chunk) {
+        const slice = toLookup.slice(i, i + chunk);
+        const left = maxMs - (Date.now() - started) - 1000;
+        if (left < 1500) break;
+        await lookupOwners(slice, {
+          deadlineMs: Math.min(20000, left),
+          concurrency: 48,
+          fetchMs: 2500,
+        });
+      }
     } catch (err) {
       mailWarning = mailWarning || err.message || 'Partial mail lookup';
     }
@@ -1358,10 +1398,10 @@ async function fetchAllPagesForMails(startDate, endDate, q) {
     row.emails = code ? OWNER_CACHE.get(code) || [] : [];
   }
 
-  if (rowCount > mappedRows.length) {
+  if (!complete) {
     mailWarning =
       (mailWarning ? `${mailWarning} · ` : '') +
-      `Top ${mappedRows.length} pages by views (of ${rowCount})`;
+      `Partial pages ${mappedRows.length}/${rowCount} — totals = loaded sum`;
   }
 
   return {
@@ -1369,7 +1409,7 @@ async function fetchAllPagesForMails(startDate, endDate, q) {
     rowCount,
     totals,
     mailWarning,
-    complete: !rowCount || mappedRows.length >= rowCount,
+    complete,
   };
 }
 
@@ -1485,19 +1525,24 @@ async function lookupOwners(codes, options = {}) {
   return out;
 }
 
+/** Primary owner only (no fractional split) — views/revenue exact integers / paise. */
 function rollupMails(rows) {
   const map = new Map();
   for (const row of rows) {
-    const owners = row.emails?.length ? row.emails : ['Mail not linked'];
-    const share = owners.length || 1;
-    for (const email of owners) {
-      if (!map.has(email)) map.set(email, { email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 });
-      const item = map.get(email);
-      item.pages += 1;
-      item.views += (Number(row.views) || 0) / share;
-      item.activeUsers += (Number(row.activeUsers) || 0) / share;
-      item.totalRevenue += (Number(row.totalRevenue) || 0) / share;
+    const email = (row.emails && row.emails[0]) || 'Mail not linked';
+    if (!map.has(email)) {
+      map.set(email, { email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 });
     }
+    const item = map.get(email);
+    item.pages += 1;
+    item.views += Number(row.views) || 0;
+    item.activeUsers += Number(row.activeUsers) || 0;
+    item.totalRevenue += Number(row.totalRevenue) || 0;
+  }
+  for (const item of map.values()) {
+    item.views = Math.round(item.views);
+    item.activeUsers = Math.round(item.activeUsers);
+    item.totalRevenue = Math.round(item.totalRevenue * 100) / 100;
   }
   return [...map.values()];
 }
@@ -1523,8 +1568,10 @@ app.get('/api/analytics/pages', async (req, res) => {
     const limitCap = mode === 'mails' ? 40 : 25;
     const limit = Math.max(1, Math.min(limitCap, parseInt(req.query.limit || String(limitCap), 10) || limitCap));
     const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
-    const cacheKey = `${mode}|${startDate}|${endDate}|${q}|${limit}|${offset}`;
-    const cached = pagesCacheGet(cacheKey);
+    const exactMail = Number(process.env.PAGES_MAIL_TOP_ROWS) <= 0 ? 'exact' : 'top';
+    const cacheKey = `${mode}|${exactMail}|${startDate}|${endDate}|${q}|${limit}|${offset}`;
+    // Exact mail mode: don't serve stale partial cache
+    const cached = mode === 'mails' && exactMail === 'exact' ? null : pagesCacheGet(cacheKey);
     if (cached) {
       return res.json({ ...cached, cached: true });
     }

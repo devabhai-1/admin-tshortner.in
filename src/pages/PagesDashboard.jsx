@@ -66,8 +66,8 @@ function shortDate(iso) {
 }
 
 const COLORS = ['#9aa0a6', '#1a73e8', '#e37400', '#0d904f', '#d93025', '#9334e6']
-const PAGES_CACHE_KEY = 'tshortner.pages.cache.v3'
-const PAGES_CACHE_TTL_MS = 2 * 60 * 1000
+const PAGES_CACHE_KEY = 'tshortner.pages.cache.v4'
+const PAGES_CACHE_TTL_MS = 90 * 1000
 
 function pagesCacheRead(kind, start, end, search) {
   try {
@@ -264,7 +264,7 @@ export default function PagesDashboard() {
 
   useEffect(() => {
     const ctrl = new AbortController()
-    const hardTimer = setTimeout(() => ctrl.abort(), 55000)
+    const hardTimer = setTimeout(() => ctrl.abort(), 170000)
     let stop = false
     async function loadMails() {
       // Bust stale empty cache from failed deploys
@@ -336,6 +336,25 @@ export default function PagesDashboard() {
   const totals = data?.totals
   const rows = data?.rows || []
   const mailSearch = mailQuery.trim().toLowerCase()
+  /** Share/Total base = sum of mail rows (same numbers as table) — GA property total alag chip */
+  const mailAgg = useMemo(() => {
+    let pages = 0
+    let views = 0
+    let activeUsers = 0
+    let totalRevenue = 0
+    for (const row of mailRows) {
+      pages += Number(row.pages) || 0
+      views += Number(row.views) || 0
+      activeUsers += Number(row.activeUsers) || 0
+      totalRevenue += Number(row.totalRevenue) || 0
+    }
+    return {
+      pages,
+      views: Math.round(views),
+      activeUsers: Math.round(activeUsers),
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+    }
+  }, [mailRows])
   const mails = useMemo(() => {
     const MIN_VIEWS = 500
     const list = mailRows.filter((row) => {
@@ -369,6 +388,10 @@ export default function PagesDashboard() {
   const pageCount = Math.max(1, Math.ceil(rowCount / pageSize))
   const mailDone = !mailLoading && mailRows.length > 0
   const legend = useMemo(() => ['Total', ...(data?.seriesPaths || [])], [data])
+  const viewsMatch =
+    mailDone && totals?.views != null
+      ? Math.abs(Number(totals.views) - mailAgg.views) <= 1
+      : null
 
   const applyRange = (start, end) => {
     setDraftStart(start)
@@ -463,8 +486,21 @@ export default function PagesDashboard() {
           </label>
         </div>
         <p className="demo-note">
-          500+ views wali mails upar. 500 se kam views wali hamesha niche.
-          CPM sort pe upar group mein sabse kam CPM pehle. CPM = kamai ÷ views × 1000 (₹).
+          Exact: har page path → primary mail (split nahi). Share = mail views ÷ table total.
+          CPM = revenue ÷ views × 1000 (₹). 500+ views upar.
+          {mailDone ? (
+            <>
+              {' '}
+              · Mail sum views <strong>{fmtInt(mailAgg.views)}</strong>
+              {totals?.views != null ? (
+                <>
+                  {' '}
+                  · GA4 total <strong>{fmtInt(totals.views)}</strong>
+                  {viewsMatch === true ? ' · ✓ match' : viewsMatch === false ? ' · ⚠ mismatch (partial load)' : ''}
+                </>
+              ) : null}
+            </>
+          ) : null}
         </p>
         <div className="demo-table-wrap">
           <table className="demo-table">
@@ -481,16 +517,16 @@ export default function PagesDashboard() {
               </tr>
             </thead>
             <tbody>
-              {totals ? (
+              {mailDone ? (
                 <tr className="demo-total">
                   <td />
-                  <td>Total</td>
-                  <td>{fmtInt(mailDone ? mailTotal : rowCount)}</td>
-                  <td>{fmtInt(totals.views)}</td>
+                  <td>Total (mail sum)</td>
+                  <td>{fmtInt(mailAgg.pages)}</td>
+                  <td>{fmtInt(mailAgg.views)}</td>
                   <td>100%</td>
-                  <td>{fmtInt(totals.activeUsers)}</td>
-                  <td>{fmtInr(totals.totalRevenue)}</td>
-                  <td>{fmtInr(cpmOf(totals.totalRevenue, totals.views))}</td>
+                  <td>{fmtInt(mailAgg.activeUsers)}</td>
+                  <td>{fmtInr(mailAgg.totalRevenue)}</td>
+                  <td>{fmtInr(cpmOf(mailAgg.totalRevenue, mailAgg.views))}</td>
                 </tr>
               ) : null}
               {mails.map((row, index) => {
@@ -504,10 +540,10 @@ export default function PagesDashboard() {
                     {low ? <small>500 se kam views</small> : null}
                   </td>
                   <td>{fmtInt(row.pages)}</td>
-                  <td>{fmtInt(row.views)}<small>{fmtShare(row.views, totals?.views)}</small></td>
-                  <td>{fmtShare(row.views, totals?.views)}</td>
+                  <td>{fmtInt(row.views)}<small>{fmtShare(row.views, mailAgg.views)}</small></td>
+                  <td>{fmtShare(row.views, mailAgg.views)}</td>
                   <td>{fmtInt(row.activeUsers)}</td>
-                  <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, totals?.totalRevenue)}</small></td>
+                  <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, mailAgg.totalRevenue)}</small></td>
                   <td>{fmtInr(cpmOf(row.totalRevenue, row.views))}</td>
                 </tr>
                 )
