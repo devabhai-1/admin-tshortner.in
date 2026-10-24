@@ -482,12 +482,14 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
   let viewTotal = 0;
   let lastError = '';
   const gaRows = [];
-  // Cap rows — full 27k+ paths × allLinks download = multi-minute hang
-  const maxFetch = Math.max(
-    500,
-    Math.min(pageSize, Number(process.env.GA4_STREAM_MAX_ROWS || 4000)),
-  );
+  // GA4_STREAM_MAX_ROWS=0 → saari rows (local). Default 4000 = Vercel-safe cap.
+  const envMax = Number(process.env.GA4_STREAM_MAX_ROWS);
+  const unlimited = Number.isFinite(envMax) && envMax <= 0;
+  const maxFetch = unlimited ? Number.POSITIVE_INFINITY : Math.max(500, envMax || 4000);
   while (Date.now() - started < maxMs && fetched < maxFetch) {
+    const limitThis = unlimited
+      ? pageSize
+      : Math.min(pageSize, Math.max(1, maxFetch - fetched));
     let response;
     try {
       const result = await Promise.race([
@@ -497,11 +499,11 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
           metrics: [{ name: 'screenPageViews' }],
           dateRanges: [{ startDate: startS, endDate: endS }],
           orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
-          limit: Math.min(pageSize, maxFetch - fetched),
+          limit: limitThis,
           offset,
           metricAggregations: ['TOTAL'],
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 20000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 report timed out')), 25000)),
       ]);
       response = result[0];
     } catch (e) {
@@ -519,15 +521,15 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
     gaRows.push(...batch);
     fetched += batch.length;
     offset += batch.length;
-    if ((totalExpected && fetched >= totalExpected) || batch.length < pageSize) break;
+    // Bugfix: pehle `batch.length < pageSize` se early stop ho jata tha jab limit < pageSize
+    if ((totalExpected && fetched >= totalExpected) || batch.length < limitThis) break;
   }
   const complete = !totalExpected || fetched >= totalExpected;
   if (!complete && !lastError) {
-    lastError = `Top ${fetched} / ${totalExpected} pages (capped for speed)`;
+    lastError = `Partial: ${fetched} / ${totalExpected} pages`;
   }
 
-  // Fast path: realtimeTraffic + capped per-code lookup.
-  // Full allLinks.json ONLY if refresh_map=1 (manual) — otherwise Vercel/local hangs.
+  // Fast path: realtimeTraffic + owner lookup (no full allLinks unless refresh_map=1)
   let lidLookup = {};
   if (refreshMap) {
     try {
@@ -549,17 +551,21 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
     const views = Number(row.metricValues?.[0]?.value || 0);
     viewByCode.set(raw, (viewByCode.get(raw) || 0) + views);
   }
-  const missing = [...viewByCode.keys()]
+  const ownerCap = Number(process.env.GA4_OWNER_LOOKUP_CAP);
+  const missingAll = [...viewByCode.keys()]
     .filter((raw) => !lidLookup[normalizeId(raw)])
-    .sort((a, b) => viewByCode.get(b) - viewByCode.get(a))
-    .slice(0, Number(process.env.GA4_OWNER_LOOKUP_CAP || 250));
+    .sort((a, b) => viewByCode.get(b) - viewByCode.get(a));
+  const missing =
+    Number.isFinite(ownerCap) && ownerCap <= 0
+      ? missingAll
+      : missingAll.slice(0, Math.max(50, ownerCap || (unlimited ? 2000 : 250)));
   const remain = maxMs - (Date.now() - started);
-  const budget = Math.min(8000, Math.max(0, remain - 2000));
+  const budget = Math.min(unlimited ? 45000 : 8000, Math.max(0, remain - 2000));
   if (missing.length && budget > 1500) {
     await lookupOwners(missing, {
       deadlineMs: budget,
-      concurrency: 40,
-      fetchMs: 2000,
+      concurrency: 48,
+      fetchMs: 2500,
     });
     for (const raw of missing) {
       const emails = OWNER_CACHE.get(raw) || [];
@@ -954,13 +960,17 @@ app.get('/api/analytics/stream', async (req, res) => {
         emit("progress", { phase: "ga4", message: "Fetching GA4…" });
 
         const refreshMap = String(req.query.refresh_map || '') === '1';
+        const streamMaxMs = Math.max(
+          30000,
+          Number(process.env.GA4_STREAM_MAX_MS || 52000) || 52000,
+        );
         const pulled = await pullGaPages({
             startS,
             endS,
             rawMode,
             refreshMap,
             pageSize: 10000,
-            maxMs: 52000,
+            maxMs: streamMaxMs,
             onBatch: async (outBatch, info) => {
                 if (!isStreamActive || !outBatch.length) return;
                 emit("rows", {

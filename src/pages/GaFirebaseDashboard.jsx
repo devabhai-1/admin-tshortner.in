@@ -22,8 +22,8 @@ import { formatUsd } from '../lib/withdrawals.js'
 
 /** GA4 allocation + Firebase save — सब calculation USD ($), wallet जैसा */
 
-const GA_ANALYTICS_SESSION_KEY = 'tshortner.ga4.analytics.v7'
-const GA_ANALYTICS_SESSION_RAW = 'tshortner.ga4.analytics.raw.v6'
+const GA_ANALYTICS_SESSION_KEY = 'tshortner.ga4.analytics.v8'
+const GA_ANALYTICS_SESSION_RAW = 'tshortner.ga4.analytics.raw.v7'
 const UNLINKED_MAIL = 'Mail not linked'
 const PANEL_MODE_KEY = 'tshortner.admin.panelMode'
 /** Pehli load: sirf latest N din (fast). Purani date select → on-demand fetch. */
