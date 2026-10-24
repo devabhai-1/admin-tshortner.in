@@ -482,7 +482,12 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
   let viewTotal = 0;
   let lastError = '';
   const gaRows = [];
-  while (Date.now() - started < maxMs) {
+  // Cap rows — full 27k+ paths × allLinks download = multi-minute hang
+  const maxFetch = Math.max(
+    500,
+    Math.min(pageSize, Number(process.env.GA4_STREAM_MAX_ROWS || 4000)),
+  );
+  while (Date.now() - started < maxMs && fetched < maxFetch) {
     let response;
     try {
       const result = await Promise.race([
@@ -492,7 +497,7 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
           metrics: [{ name: 'screenPageViews' }],
           dateRanges: [{ startDate: startS, endDate: endS }],
           orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
-          limit: pageSize,
+          limit: Math.min(pageSize, maxFetch - fetched),
           offset,
           metricAggregations: ['TOTAL'],
         }),
@@ -518,15 +523,18 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
   }
   const complete = !totalExpected || fetched >= totalExpected;
   if (!complete && !lastError) {
-    lastError = `Incomplete: ${fetched} / ${totalExpected} pages loaded`;
+    lastError = `Top ${fetched} / ${totalExpected} pages (capped for speed)`;
   }
 
-  // Full allLinks map first (avoids timeout → huge "Mail not linked")
+  // Fast path: realtimeTraffic + capped per-code lookup.
+  // Full allLinks.json ONLY if refresh_map=1 (manual) — otherwise Vercel/local hangs.
   let lidLookup = {};
-  try {
-    lidLookup = linkIdToEmailLookup(await firebaseMappingCached(!!refreshMap)) || {};
-  } catch (e) {
-    console.warn('firebase map for GA pull:', e.message);
+  if (refreshMap) {
+    try {
+      lidLookup = linkIdToEmailLookup(await firebaseMappingCached(true)) || {};
+    } catch (e) {
+      console.warn('firebase map for GA pull:', e.message);
+    }
   }
 
   const realtimeEmails = await loadRealtimeEmails(startS, endS);
@@ -543,37 +551,18 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
   }
   const missing = [...viewByCode.keys()]
     .filter((raw) => !lidLookup[normalizeId(raw)])
-    .sort((a, b) => viewByCode.get(b) - viewByCode.get(a));
+    .sort((a, b) => viewByCode.get(b) - viewByCode.get(a))
+    .slice(0, Number(process.env.GA4_OWNER_LOOKUP_CAP || 250));
   const remain = maxMs - (Date.now() - started);
-  const budget = Math.min(22000, Math.max(0, remain - 4000));
-  if (missing.length && budget > 2000) {
+  const budget = Math.min(8000, Math.max(0, remain - 2000));
+  if (missing.length && budget > 1500) {
     await lookupOwners(missing, {
       deadlineMs: budget,
       concurrency: 40,
-      fetchMs: 4000,
+      fetchMs: 2000,
     });
-    const retry = missing.filter((raw) => !OWNER_CACHE.has(raw));
-    const after = maxMs - (Date.now() - started);
-    if (retry.length && after > 4000) {
-      await lookupOwners(retry, {
-        deadlineMs: Math.min(after - 3000, 14000),
-        concurrency: 24,
-        fetchMs: 5000,
-      });
-    }
     for (const raw of missing) {
       const emails = OWNER_CACHE.get(raw) || [];
-      const norm = normalizeId(raw);
-      if (norm && emails[0]) lidLookup[norm] = emails[0];
-    }
-  }
-  const afterLookup = maxMs - (Date.now() - started);
-  const still = missing.filter((raw) => !lidLookup[normalizeId(raw)]).slice(0, 400);
-  if (still.length && afterLookup > 3000) {
-    const looseFound = await lookupLooseOwners(still, {
-      deadlineMs: Math.min(afterLookup - 1500, 8000),
-    });
-    for (const [raw, emails] of looseFound) {
       const norm = normalizeId(raw);
       if (norm && emails[0]) lidLookup[norm] = emails[0];
     }

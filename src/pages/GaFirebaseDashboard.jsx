@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ref, get, update, remove, onValue } from 'firebase/database'
+import { ref, get, update, remove } from 'firebase/database'
 import { useFirebaseDb } from '../context/FirebaseProvider.jsx'
 import {
   computeSummaryFromDaily,
@@ -27,7 +27,8 @@ const GA_ANALYTICS_SESSION_RAW = 'tshortner.ga4.analytics.raw.v6'
 const UNLINKED_MAIL = 'Mail not linked'
 const PANEL_MODE_KEY = 'tshortner.admin.panelMode'
 /** Pehli load: sirf latest N din (fast). Purani date select → on-demand fetch. */
-const GA_INITIAL_DAYS = Number(import.meta.env.VITE_GA4_INITIAL_DAYS) || 5
+/** Pehle sirf aaj (+ optional extra). Zyada din = zyada slow. */
+const GA_INITIAL_DAYS = Math.max(1, Math.min(7, Number(import.meta.env.VITE_GA4_INITIAL_DAYS) || 2))
 const GA_PICKER_DAYS = Number(import.meta.env.VITE_GA4_PICKER_DAYS) || 365
 
 function isoDateDaysAgo(n) {
@@ -377,8 +378,11 @@ export default function GaFirebaseDashboard() {
         let incoming = []
         let meta = null
         const incomplete = []
-        setSelectedGaDate(isoDateDaysAgo(0))
-        for (const day of days) {
+        const todayIso = isoDateDaysAgo(0)
+        setSelectedGaDate(todayIso)
+        // Aaj pehle → UI jaldi usable; baaki din baad me
+        const orderedDays = [todayIso, ...days.filter((d) => d !== todayIso)]
+        for (const day of orderedDays) {
           setLoadingDate(day)
           setGaMsg({ text: `⟳ ${day} ki views load ho rahi hain…`, kind: 'neutral' })
           const part = await streamGaRange(day, day, {
@@ -405,6 +409,14 @@ export default function GaFirebaseDashboard() {
           incoming = mergeGaRows(incoming, part.rows || [])
           meta = part.meta || meta
           if (part.meta && part.meta.ga4_complete === false) incomplete.push(day)
+          // Pehle din ke baad table dikhao
+          if (day === todayIso && incoming.length) {
+            setAnalyticsReady(true)
+            setGaMsg({
+              text: `✅ Aaj (${todayIso}) ready — baaki ${GA_INITIAL_DAYS - 1} din sync…`,
+              kind: 'ok',
+            })
+          }
         }
         setAnalyticsRows((prev) => replaceRowsInRange(prev, incoming, startDate, endDate))
 
@@ -415,7 +427,6 @@ export default function GaFirebaseDashboard() {
           sessionStorage.removeItem(cacheKey)
         }
 
-        const todayIso = isoDateDaysAgo(0)
         setFbDate((d) => d || todayIso)
         setSelectedGaDate((cur) => cur || todayIso)
 
@@ -575,30 +586,38 @@ export default function GaFirebaseDashboard() {
 
   useEffect(() => {
     if (!db) return
-    const usersRef = ref(db, 'users')
-    setUserListMsg({ text: 'Firebase users (live)…', kind: 'neutral' })
-    const unsub = onValue(
-      usersRef,
-      (snap) => {
-        const users = snap.val() || {}
-        const keys = Object.keys(users)
+    let cancelled = false
+    // Poora users.json live = bahut bhari; sirf shallow keys
+    setUserListMsg({ text: 'Firebase users (keys)…', kind: 'neutral' })
+    ;(async () => {
+      try {
+        const dbUrl =
+          import.meta.env.VITE_FIREBASE_DATABASE_URL ||
+          'https://tshortner-in-default-rtdb.asia-southeast1.firebasedatabase.app'
+        const res = await fetch(`${dbUrl}/users.json?shallow=true`, {
+          signal: AbortSignal.timeout(20000),
+        })
+        if (!res.ok) throw new Error(`users shallow HTTP ${res.status}`)
+        const body = await res.json()
+        const keys = body && typeof body === 'object' ? Object.keys(body) : []
+        if (cancelled) return
         setAllUserKeys(keys)
-        if (!keys.length)
-          setUserListMsg({ text: '⚠ No users in Firebase', kind: 'err' })
-        else
-          setUserListMsg({
-            text: `✅ Live · ${keys.length.toLocaleString('en-IN')} users`,
-            kind: 'ok',
-          })
-      },
-      (err) => {
+        setUserListMsg(
+          keys.length
+            ? { text: `✅ ${keys.length.toLocaleString('en-IN')} users (keys)`, kind: 'ok' }
+            : { text: '⚠ No users in Firebase', kind: 'err' },
+        )
+      } catch (err) {
+        if (cancelled) return
         setUserListMsg({
           text: '❌ Firebase users: ' + (err instanceof Error ? err.message : String(err)),
           kind: 'err',
         })
-      },
-    )
-    return unsub
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [db])
 
   useEffect(() => {
