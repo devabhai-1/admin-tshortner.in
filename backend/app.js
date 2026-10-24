@@ -1253,14 +1253,14 @@ async function runPagesReport(startDate, endDate, { limit, offset, q, metrics })
 }
 
 /**
- * Mail rollup for /pages — Vercel-safe:
- * - Top N pages by views only (not all 27k+)
- * - Per-code Firebase lookup (never download full allLinks.json)
+ * Mail rollup — keep under Vercel ~60s:
+ * 1) Top pages from GA4 (not all 27k)
+ * 2) realtimeTraffic email map (1 request/day — fast)
+ * 3) only a small OWNER_CACHE fill for leftover top codes
  */
 async function fetchAllPagesForMails(startDate, endDate, q) {
   const metrics = ['screenPageViews', 'activeUsers', 'totalRevenue'];
-  // ~27k paths exist; top 2k covers almost all meaningful traffic
-  const maxRows = Math.max(500, Math.min(3000, Number(process.env.PAGES_MAIL_TOP_ROWS || 2000)));
+  const maxRows = Math.max(300, Math.min(1200, Number(process.env.PAGES_MAIL_TOP_ROWS || 800)));
   const report = await runPagesReport(startDate, endDate, {
     limit: maxRows,
     offset: 0,
@@ -1300,28 +1300,62 @@ async function fetchAllPagesForMails(startDate, endDate, q) {
         keyEvents: 0,
       };
 
-  const codes = [];
-  for (const row of mappedRows) {
-    // Keep Firebase key casing (path segment as-is)
-    const code = pathCode(row.path);
-    row._code = code;
-    if (code && isLikelyShortCode(normalizeId(code) || code)) codes.push(code);
+  let mailWarning = '';
+  let realtimeEmails = new Map();
+  try {
+    realtimeEmails = await loadRealtimeEmails(startDate, endDate);
+  } catch (err) {
+    mailWarning = err.message || 'Realtime mail map fail';
   }
 
-  let mailWarning = '';
-  try {
-    await lookupOwners([...new Set(codes)], {
-      deadlineMs: 12000,
-      concurrency: 48,
-      fetchMs: 2500,
-    });
-  } catch (err) {
-    mailWarning = err.message || 'Partial mail lookup';
+  const resolveEmail = (code) => {
+    if (!code) return '';
+    const raw = String(code);
+    const lower = raw.toLowerCase();
+    const loose = looseLinkId(raw).toLowerCase();
+    return (
+      realtimeEmails.get(lower) ||
+      realtimeEmails.get(loose) ||
+      realtimeEmails.get(raw) ||
+      ''
+    );
+  };
+
+  const missing = [];
+  for (const row of mappedRows) {
+    const code = pathCode(row.path);
+    row._code = code;
+    const email = resolveEmail(code);
+    if (email) {
+      row.emails = [email];
+      OWNER_CACHE.set(code, [email]);
+    } else {
+      row.emails = [];
+      if (code && isLikelyShortCode(normalizeId(code) || code)) {
+        missing.push({ code, views: row.views || 0 });
+      }
+    }
+  }
+
+  // Highest-traffic unmatched only — avoid 2k Firebase HTTP fan-out (504)
+  missing.sort((a, b) => b.views - a.views);
+  const toLookup = [...new Set(missing.map((m) => m.code))].slice(0, 120);
+  if (toLookup.length) {
+    try {
+      await lookupOwners(toLookup, {
+        deadlineMs: 5000,
+        concurrency: 30,
+        fetchMs: 1800,
+      });
+    } catch (err) {
+      mailWarning = mailWarning || err.message || 'Partial mail lookup';
+    }
   }
 
   for (const row of mappedRows) {
     const code = row._code;
     delete row._code;
+    if (row.emails?.length) continue;
     row.emails = code ? OWNER_CACHE.get(code) || [] : [];
   }
 

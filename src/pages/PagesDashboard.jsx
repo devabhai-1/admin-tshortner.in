@@ -66,7 +66,7 @@ function shortDate(iso) {
 }
 
 const COLORS = ['#9aa0a6', '#1a73e8', '#e37400', '#0d904f', '#d93025', '#9334e6']
-const PAGES_CACHE_KEY = 'tshortner.pages.cache.v2'
+const PAGES_CACHE_KEY = 'tshortner.pages.cache.v3'
 const PAGES_CACHE_TTL_MS = 2 * 60 * 1000
 
 function pagesCacheRead(kind, start, end, search) {
@@ -264,28 +264,32 @@ export default function PagesDashboard() {
 
   useEffect(() => {
     const ctrl = new AbortController()
+    const hardTimer = setTimeout(() => ctrl.abort(), 55000)
     let stop = false
     async function loadMails() {
+      // Bust stale empty cache from failed deploys
       const cached = pagesCacheRead('mails', startDate, endDate, search)
-      if (cached) {
-        setMailRows(cached.mails || [])
-        setMailLoaded(Number(cached.rowCount || cached.mails?.length || 0))
-        setMailTotal(Number(cached.rowCount || cached.mails?.length || 0))
+      if (cached?.mails?.length) {
+        setMailRows(cached.mails)
+        setMailLoaded(Number(cached.rowCount || cached.mails.length))
+        setMailTotal(Number(cached.rowCount || cached.mails.length))
         setMailLoading(false)
-        setData((prev) =>
-          prev?.totals
-            ? prev
-            : { ...(prev || {}), totals: cached.totals, rowCount: cached.rowCount, mailWarning: cached.mailWarning },
-        )
+        setData((prev) => ({
+          ...(prev || {}),
+          totals: cached.totals || prev?.totals,
+          rowCount: cached.rowCount ?? prev?.rowCount,
+          mailWarning: cached.mailWarning || '',
+        }))
       } else {
         setMailLoading(true)
-        setMailRows([])
-        setMailLoaded(0)
-        setMailTotal(0)
+        if (!cached?.mails?.length) {
+          setMailRows([])
+          setMailLoaded(0)
+          setMailTotal(0)
+        }
       }
       setMailError('')
       try {
-        // Single request — server pulls all pages + allLinks map (no 40-row loop)
         const params = new URLSearchParams({
           start_date: startDate,
           end_date: endDate,
@@ -294,13 +298,16 @@ export default function PagesDashboard() {
         if (search) params.set('q', search)
         const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
         const body = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(body.error || 'Mail totals nahi aaye')
+        if (!res.ok) throw new Error(body.error || `Mail totals fail (${res.status})`)
         if (stop) return
+        const list = Array.isArray(body.mails) ? body.mails : []
+        if (!list.length) {
+          throw new Error(body.mailWarning || 'Mail list empty — dobara try karo')
+        }
         pagesCacheWrite('mails', startDate, endDate, search, body)
-        const list = body.mails || []
         setMailRows(list)
-        setMailLoaded(Number(body.rowCount || list.length))
-        setMailTotal(Number(body.rowCount || list.length))
+        setMailLoaded(list.length)
+        setMailTotal(list.length)
         setData((prev) => ({
           ...(prev || {}),
           totals: body.totals || prev?.totals,
@@ -308,15 +315,20 @@ export default function PagesDashboard() {
           mailWarning: body.mailWarning || '',
         }))
       } catch (err) {
-        if (err.name === 'AbortError' || stop) return
+        if (err.name === 'AbortError' || stop) {
+          if (!stop) setMailError('Mail load timeout — page refresh karke try karo')
+          return
+        }
         setMailError(err.message || 'Mail totals nahi aaye')
       } finally {
+        clearTimeout(hardTimer)
         if (!stop) setMailLoading(false)
       }
     }
     loadMails()
     return () => {
       stop = true
+      clearTimeout(hardTimer)
       ctrl.abort()
     }
   }, [startDate, endDate, search])
@@ -500,8 +512,15 @@ export default function PagesDashboard() {
                 </tr>
                 )
               })}
-              {!loading && !mails.length ? (
-                <tr><td colSpan={8}>Is range par koi mail nahi mili.</td></tr>
+              {mailLoading && !mails.length ? (
+                <tr><td colSpan={8}>⏳ Mails load ho rahe hain…</td></tr>
+              ) : null}
+              {!mailLoading && !mails.length ? (
+                <tr>
+                  <td colSpan={8}>
+                    {mailError || 'Is range par koi mail nahi mili.'}
+                  </td>
+                </tr>
               ) : null}
             </tbody>
           </table>
