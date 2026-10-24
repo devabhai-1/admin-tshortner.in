@@ -323,6 +323,41 @@ function linkIdToEmailLookup(fbMap) {
   return out;
 }
 
+/** linkId → [emails] for /pages mail rollup (fast, no per-code HTTP) */
+function linkIdToEmailsLookup(fbMap) {
+  const out = {};
+  for (const email in fbMap) {
+    for (const ent of fbMap[email] || []) {
+      const lid = ent?.id;
+      if (!lid) continue;
+      if (!out[lid]) out[lid] = [];
+      if (!out[lid].includes(email)) out[lid].push(email);
+    }
+  }
+  return out;
+}
+
+const PAGES_API_CACHE = new Map();
+const PAGES_API_TTL_MS = Math.max(15000, Number(process.env.PAGES_API_CACHE_MS || 90000));
+
+function pagesCacheGet(key) {
+  const hit = PAGES_API_CACHE.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > PAGES_API_TTL_MS) {
+    PAGES_API_CACHE.delete(key);
+    return null;
+  }
+  return hit.body;
+}
+
+function pagesCacheSet(key, body) {
+  PAGES_API_CACHE.set(key, { at: Date.now(), body });
+  if (PAGES_API_CACHE.size > 40) {
+    const oldest = [...PAGES_API_CACHE.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) PAGES_API_CACHE.delete(oldest[0]);
+  }
+}
+
 function formatDate(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -1217,6 +1252,119 @@ async function runPagesReport(startDate, endDate, { limit, offset, q, metrics })
   }
 }
 
+/** All page rows for mail rollup — few large GA4 pages instead of 40-row client loop */
+async function fetchAllPagesForMails(startDate, endDate, q) {
+  const metrics = ['screenPageViews', 'activeUsers', 'totalRevenue'];
+  const pageSize = 10000;
+  const maxRows = 50000;
+  const started = Date.now();
+  const maxMs = 45000;
+  let offset = 0;
+  let rowCount = 0;
+  let totalsRow = null;
+  let metricNames = metrics;
+  const mappedRows = [];
+
+  while (Date.now() - started < maxMs && mappedRows.length < maxRows) {
+    const report = await runPagesReport(startDate, endDate, {
+      limit: pageSize,
+      offset,
+      q,
+      metrics,
+    });
+    metricNames = report._metricNames || metrics;
+    const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+    if (!totalsRow && report.totals?.[0]) totalsRow = report.totals[0];
+    rowCount = Number(report.rowCount || rowCount);
+    const batch = report.rows || [];
+    for (const row of batch) {
+      mappedRows.push({
+        path: row.dimensionValues?.[0]?.value || '(not set)',
+        views: numMetric(row, idx.screenPageViews),
+        activeUsers: numMetric(row, idx.activeUsers),
+        totalRevenue: numMetric(row, idx.totalRevenue),
+      });
+    }
+    offset += batch.length;
+    if (!batch.length || offset >= rowCount || batch.length < pageSize) break;
+  }
+
+  const idxT = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+  const totals = totalsRow
+    ? {
+        path: 'Total',
+        views: numMetric(totalsRow, idxT.screenPageViews),
+        activeUsers: numMetric(totalsRow, idxT.activeUsers),
+        totalRevenue: numMetric(totalsRow, idxT.totalRevenue),
+        viewsPerUser: 0,
+        avgEngagementTime: 0,
+        eventCount: 0,
+        keyEvents: 0,
+      }
+    : {
+        path: 'Total',
+        views: mappedRows.reduce((s, r) => s + r.views, 0),
+        activeUsers: mappedRows.reduce((s, r) => s + r.activeUsers, 0),
+        totalRevenue: mappedRows.reduce((s, r) => s + r.totalRevenue, 0),
+        viewsPerUser: 0,
+        avgEngagementTime: 0,
+        eventCount: 0,
+        keyEvents: 0,
+      };
+
+  let mailWarning = '';
+  let emailsByCode = {};
+  try {
+    emailsByCode = linkIdToEmailsLookup(await firebaseMappingCached(false)) || {};
+  } catch (err) {
+    mailWarning = err.message || 'Mail map nahi bana';
+  }
+
+  const missing = [];
+  for (const row of mappedRows) {
+    const code = normalizeId(pathCode(row.path)) || pathCode(row.path);
+    const emails = (code && emailsByCode[code]) || [];
+    if (emails.length) {
+      row.emails = emails;
+    } else if (code && isLikelyShortCode(code)) {
+      missing.push(code);
+      row._code = code;
+      row.emails = [];
+    } else {
+      row.emails = [];
+    }
+  }
+
+  // Top unmatched short codes only (budget) — rest stay unlinked
+  const uniqMissing = [...new Set(missing)].slice(0, 300);
+  if (uniqMissing.length) {
+    try {
+      const found = await lookupOwners(uniqMissing, {
+        deadlineMs: 6000,
+        concurrency: 40,
+        fetchMs: 2000,
+      });
+      for (const row of mappedRows) {
+        if (row.emails?.length || !row._code) continue;
+        row.emails = found.get(row._code) || OWNER_CACHE.get(row._code) || [];
+        delete row._code;
+      }
+    } catch (err) {
+      mailWarning = mailWarning || err.message || 'Partial mail lookup';
+    }
+  } else {
+    for (const row of mappedRows) delete row._code;
+  }
+
+  return {
+    rows: mappedRows,
+    rowCount: rowCount || mappedRows.length,
+    totals,
+    mailWarning,
+    complete: !rowCount || mappedRows.length >= rowCount,
+  };
+}
+
 function pathCode(path) {
   const clean = String(path || '').split('?')[0].replace(/\/+$/, '');
   const parts = clean.split('/').filter(Boolean);
@@ -1364,6 +1512,14 @@ app.get('/api/analytics/pages', async (req, res) => {
 
     const mode = req.query.mode === 'mails' ? 'mails' : req.query.mode === 'series' ? 'series' : 'table';
     const q = String(req.query.q || '').trim().slice(0, 120);
+    const limitCap = mode === 'mails' ? 40 : 25;
+    const limit = Math.max(1, Math.min(limitCap, parseInt(req.query.limit || String(limitCap), 10) || limitCap));
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+    const cacheKey = `${mode}|${startDate}|${endDate}|${q}|${limit}|${offset}`;
+    const cached = pagesCacheGet(cacheKey);
+    if (cached) {
+      return res.json({ ...cached, cached: true });
+    }
 
     if (mode === 'series') {
       const [dateRes] = await Promise.race([
@@ -1390,18 +1546,42 @@ app.get('/api/analytics/pages', async (req, res) => {
         Total: Number(row.metricValues?.[0]?.value || 0),
         revenue: Number(row.metricValues?.[1]?.value || 0),
       }));
-      return res.json({ startDate, endDate, q, mode, series, seriesPaths: [] });
+      const body = { startDate, endDate, q, mode, series, seriesPaths: [] };
+      pagesCacheSet(cacheKey, body);
+      return res.json(body);
     }
 
-    const limitCap = mode === 'mails' ? 40 : 25;
-    const limit = Math.max(1, Math.min(limitCap, parseInt(req.query.limit || String(limitCap), 10) || limitCap));
-    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+    // One server-side pull of all pages + in-memory allLinks map (not 40-row client loop)
+    if (mode === 'mails') {
+      const pulled = await fetchAllPagesForMails(startDate, endDate, q);
+      const mails = rollupMails(pulled.rows).sort(
+        (a, b) => (Number(b.views) || 0) - (Number(a.views) || 0),
+      );
+      const body = {
+        startDate,
+        endDate,
+        q,
+        mode,
+        limit: pulled.rows.length,
+        offset: 0,
+        nextOffset: pulled.rows.length,
+        done: true,
+        rowCount: pulled.rowCount,
+        currency: 'INR',
+        totals: pulled.totals,
+        mails,
+        mailWarning: pulled.mailWarning || (pulled.complete ? '' : 'Partial page list (GA4 cap)'),
+        complete: pulled.complete,
+      };
+      pagesCacheSet(cacheKey, body);
+      return res.json(body);
+    }
 
     const report = await runPagesReport(startDate, endDate, {
       limit,
       offset,
       q,
-      metrics: mode === 'mails' ? ['screenPageViews', 'activeUsers', 'totalRevenue'] : undefined,
+      metrics: undefined,
     });
     const metricNames = report._metricNames || PAGE_METRICS;
     const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
@@ -1423,21 +1603,50 @@ app.get('/api/analytics/pages', async (req, res) => {
     };
 
     const mappedRows = (report.rows || []).map(mapRow);
-    let ownersByCode = new Map();
+    let emailsByCode = {};
     let mailWarning = '';
     try {
-      ownersByCode = await lookupOwners(mappedRows.map((row) => pathCode(row.path)));
+      emailsByCode = linkIdToEmailsLookup(await firebaseMappingCached(false)) || {};
     } catch (err) {
-      console.error('mail lookup', err);
+      console.error('mail map', err);
       mailWarning = err.message || 'Mail map nahi bana';
     }
-    const rows = mappedRows.map((row) => {
-      row.emails = ownersByCode.get(pathCode(row.path)) || [];
-      return row;
-    });
+    const missingCodes = [];
+    for (const row of mappedRows) {
+      const code = normalizeId(pathCode(row.path)) || pathCode(row.path);
+      const emails = (code && emailsByCode[code]) || [];
+      if (emails.length) {
+        row.emails = emails;
+      } else if (code) {
+        missingCodes.push(code);
+        row._code = code;
+        row.emails = [];
+      } else {
+        row.emails = [];
+      }
+    }
+    if (missingCodes.length) {
+      try {
+        const found = await lookupOwners([...new Set(missingCodes)], {
+          deadlineMs: 4000,
+          concurrency: 24,
+          fetchMs: 1500,
+        });
+        for (const row of mappedRows) {
+          if (row.emails?.length || !row._code) {
+            delete row._code;
+            continue;
+          }
+          row.emails = found.get(row._code) || [];
+          delete row._code;
+        }
+      } catch (err) {
+        mailWarning = mailWarning || err.message;
+        for (const row of mappedRows) delete row._code;
+      }
+    }
+    const rows = mappedRows;
     const rowCount = Number(report.rowCount || 0);
-    const nextOffset = offset + rows.length;
-    const done = !rows.length || nextOffset >= rowCount;
     const totalsRow = report.totals?.[0];
     const totals = totalsRow
       ? mapRow({ ...totalsRow, dimensionValues: [{ value: 'Total' }] })
@@ -1453,25 +1662,7 @@ app.get('/api/analytics/pages', async (req, res) => {
         };
     totals.path = 'Total';
 
-    if (mode === 'mails') {
-      return res.json({
-        startDate,
-        endDate,
-        q,
-        mode,
-        limit,
-        offset,
-        nextOffset,
-        done,
-        rowCount,
-        currency: 'INR',
-        totals,
-        mails: rollupMails(rows),
-        mailWarning,
-      });
-    }
-
-    return res.json({
+    const body = {
       startDate,
       endDate,
       q,
@@ -1486,7 +1677,9 @@ app.get('/api/analytics/pages', async (req, res) => {
       mailWarning,
       series: [],
       seriesPaths: [],
-    });
+    };
+    pagesCacheSet(cacheKey, body);
+    return res.json(body);
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: e.message || 'Pages report failed' });

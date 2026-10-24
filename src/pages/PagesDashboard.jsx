@@ -66,6 +66,39 @@ function shortDate(iso) {
 }
 
 const COLORS = ['#9aa0a6', '#1a73e8', '#e37400', '#0d904f', '#d93025', '#9334e6']
+const PAGES_CACHE_KEY = 'tshortner.pages.cache.v2'
+const PAGES_CACHE_TTL_MS = 2 * 60 * 1000
+
+function pagesCacheRead(kind, start, end, search) {
+  try {
+    const raw = sessionStorage.getItem(PAGES_CACHE_KEY)
+    if (!raw) return null
+    const all = JSON.parse(raw)
+    const hit = all?.[`${kind}|${start}|${end}|${search || ''}`]
+    if (!hit || Date.now() - hit.t > PAGES_CACHE_TTL_MS) return null
+    return hit.data
+  } catch {
+    return null
+  }
+}
+
+function pagesCacheWrite(kind, start, end, search, data) {
+  try {
+    const raw = sessionStorage.getItem(PAGES_CACHE_KEY)
+    const all = raw ? JSON.parse(raw) : {}
+    all[`${kind}|${start}|${end}|${search || ''}`] = { t: Date.now(), data }
+    const keys = Object.keys(all)
+    if (keys.length > 12) {
+      keys
+        .sort((a, b) => (all[a].t || 0) - (all[b].t || 0))
+        .slice(0, keys.length - 12)
+        .forEach((k) => delete all[k])
+    }
+    sessionStorage.setItem(PAGES_CACHE_KEY, JSON.stringify(all))
+  } catch {
+    /* ignore quota */
+  }
+}
 
 function ViewsChart({ series, paths }) {
   const lines = ['Total', ...paths]
@@ -145,7 +178,17 @@ export default function PagesDashboard() {
     const ctrl = new AbortController()
     let stop = false
     async function loadTable() {
-      setLoading(true)
+      const cached = pagesCacheRead('table', startDate, endDate, `${search}|${page}`)
+      if (cached) {
+        setData((prev) => ({
+          ...cached,
+          series: prev?.series || cached.series || [],
+          seriesPaths: prev?.seriesPaths || cached.seriesPaths || [],
+        }))
+        setLoading(false)
+      } else {
+        setLoading(true)
+      }
       setError('')
       try {
         const params = new URLSearchParams({
@@ -160,6 +203,7 @@ export default function PagesDashboard() {
         const body = await res.json().catch(() => ({}))
         if (!res.ok) throw new Error(body.error || 'Pages report nahi aaya')
         if (stop) return
+        pagesCacheWrite('table', startDate, endDate, `${search}|${page}`, body)
         setData((prev) => ({
           ...body,
           series: prev?.series || [],
@@ -183,6 +227,14 @@ export default function PagesDashboard() {
     const ctrl = new AbortController()
     let stop = false
     async function loadSeries() {
+      const cached = pagesCacheRead('series', startDate, endDate, search)
+      if (cached && !stop) {
+        setData((prev) => ({
+          ...(prev || {}),
+          series: cached.series || [],
+          seriesPaths: cached.seriesPaths || [],
+        }))
+      }
       try {
         const params = new URLSearchParams({
           start_date: startDate,
@@ -193,6 +245,7 @@ export default function PagesDashboard() {
         const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
         const body = await res.json().catch(() => ({}))
         if (!res.ok || stop) return
+        pagesCacheWrite('series', startDate, endDate, search, body)
         setData((prev) => ({
           ...(prev || {}),
           series: body.series || [],
@@ -213,45 +266,47 @@ export default function PagesDashboard() {
     const ctrl = new AbortController()
     let stop = false
     async function loadMails() {
-      setMailLoading(true)
+      const cached = pagesCacheRead('mails', startDate, endDate, search)
+      if (cached) {
+        setMailRows(cached.mails || [])
+        setMailLoaded(Number(cached.rowCount || cached.mails?.length || 0))
+        setMailTotal(Number(cached.rowCount || cached.mails?.length || 0))
+        setMailLoading(false)
+        setData((prev) =>
+          prev?.totals
+            ? prev
+            : { ...(prev || {}), totals: cached.totals, rowCount: cached.rowCount, mailWarning: cached.mailWarning },
+        )
+      } else {
+        setMailLoading(true)
+        setMailRows([])
+        setMailLoaded(0)
+        setMailTotal(0)
+      }
       setMailError('')
-      setMailRows([])
-      setMailLoaded(0)
-      setMailTotal(0)
-      const merged = new Map()
-      let offset = 0
-      const limit = 40
       try {
-        while (!stop) {
-          const params = new URLSearchParams({
-            start_date: startDate,
-            end_date: endDate,
-            limit: String(limit),
-            offset: String(offset),
-            mode: 'mails',
-          })
-          if (search) params.set('q', search)
-          const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
-          const body = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(body.error || 'Mail totals nahi aaye')
-          for (const mail of body.mails || []) {
-            if (!merged.has(mail.email)) {
-              merged.set(mail.email, { email: mail.email, pages: 0, views: 0, activeUsers: 0, totalRevenue: 0 })
-            }
-            const item = merged.get(mail.email)
-            item.pages += Number(mail.pages) || 0
-            item.views += Number(mail.views) || 0
-            item.activeUsers += Number(mail.activeUsers) || 0
-            item.totalRevenue += Number(mail.totalRevenue) || 0
-          }
-          offset = Number(body.nextOffset ?? offset)
-          const total = Number(body.rowCount || 0)
-          setMailLoaded(offset)
-          setMailTotal(total)
-          setMailRows(Array.from(merged.values()))
-          if (body.done || offset >= total || !(body.mails || []).length && offset === 0) break
-          if (!body.mails?.length) break
-        }
+        // Single request — server pulls all pages + allLinks map (no 40-row loop)
+        const params = new URLSearchParams({
+          start_date: startDate,
+          end_date: endDate,
+          mode: 'mails',
+        })
+        if (search) params.set('q', search)
+        const res = await apiFetch(`/api/analytics/pages?${params}`, { signal: ctrl.signal })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(body.error || 'Mail totals nahi aaye')
+        if (stop) return
+        pagesCacheWrite('mails', startDate, endDate, search, body)
+        const list = body.mails || []
+        setMailRows(list)
+        setMailLoaded(Number(body.rowCount || list.length))
+        setMailTotal(Number(body.rowCount || list.length))
+        setData((prev) => ({
+          ...(prev || {}),
+          totals: body.totals || prev?.totals,
+          rowCount: body.rowCount ?? prev?.rowCount,
+          mailWarning: body.mailWarning || '',
+        }))
       } catch (err) {
         if (err.name === 'AbortError' || stop) return
         setMailError(err.message || 'Mail totals nahi aaye')
@@ -300,7 +355,7 @@ export default function PagesDashboard() {
   }, [mailRows, mailSearch, mailSort])
   const rowCount = Number(data?.rowCount || mailTotal || 0)
   const pageCount = Math.max(1, Math.ceil(rowCount / pageSize))
-  const mailDone = mailTotal > 0 && mailLoaded >= mailTotal && !mailLoading
+  const mailDone = !mailLoading && mailRows.length > 0
   const legend = useMemo(() => ['Total', ...(data?.seriesPaths || [])], [data])
 
   const applyRange = (start, end) => {
