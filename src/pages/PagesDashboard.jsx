@@ -58,6 +58,71 @@ function cpmOf(revenue, views) {
   return ((Number(revenue) || 0) / count) * 1000
 }
 
+const UNLINKED = 'Mail not linked'
+const EARN_INPUT_KEY = 'tshortner.pages.earnInput.v1'
+
+/** Exact ₹ paise allocation by view share (largest remainder). */
+function allocateByViews(rows, totalEarn, totalImps) {
+  const earn = Math.max(0, Number(totalEarn) || 0)
+  const linked = rows.filter((r) => r.email !== UNLINKED)
+  const linkedViews = linked.reduce((s, r) => s + (Number(r.views) || 0), 0)
+  const baseImps = Math.max(0, Number(totalImps) || 0) || linkedViews
+  if (!linked.length || linkedViews <= 0) {
+    return {
+      byEmail: {},
+      linkedViews: 0,
+      baseImps: 0,
+      totalEarn: earn,
+    }
+  }
+
+  const raw = linked.map((r) => {
+    const views = Number(r.views) || 0
+    const share = views / linkedViews
+    const earnExact = share * earn
+    const impsExact = share * baseImps
+    return {
+      email: r.email,
+      views,
+      share,
+      earnFloor: Math.floor(earnExact * 100) / 100,
+      earnFrac: earnExact * 100 - Math.floor(earnExact * 100),
+      impsFloor: Math.floor(impsExact),
+      impsFrac: impsExact - Math.floor(impsExact),
+      earnExact,
+      impsExact,
+    }
+  })
+
+  let earnLeft = Math.round(earn * 100) - raw.reduce((s, r) => s + Math.round(r.earnFloor * 100), 0)
+  const earnOrder = raw.slice().sort((a, b) => b.earnFrac - a.earnFrac)
+  for (let i = 0; i < earnOrder.length && earnLeft > 0; i += 1) {
+    earnOrder[i].earnFloor = Math.round((earnOrder[i].earnFloor + 0.01) * 100) / 100
+    earnLeft -= 1
+  }
+
+  let impsLeft = Math.round(baseImps) - raw.reduce((s, r) => s + r.impsFloor, 0)
+  const impsOrder = raw.slice().sort((a, b) => b.impsFrac - a.impsFrac)
+  for (let i = 0; i < impsOrder.length && impsLeft > 0; i += 1) {
+    impsOrder[i].impsFloor += 1
+    impsLeft -= 1
+  }
+
+  const byEmail = {}
+  for (const r of raw) {
+    const earnings = r.earnFloor
+    const impressions = r.impsFloor
+    byEmail[r.email] = {
+      views: r.views,
+      share: r.share,
+      earnings,
+      impressions,
+      cpm: impressions > 0 ? (earnings / impressions) * 1000 : 0,
+    }
+  }
+  return { byEmail, linkedViews, baseImps, totalEarn: earn }
+}
+
 function shortDate(iso) {
   if (!iso) return ''
   const [, m, d] = iso.split('-')
@@ -163,7 +228,35 @@ export default function PagesDashboard() {
   const [mailError, setMailError] = useState('')
   const [mailLoaded, setMailLoaded] = useState(0)
   const [mailTotal, setMailTotal] = useState(0)
+  const [totalEarnInr, setTotalEarnInr] = useState('')
+  const [totalImpsIn, setTotalImpsIn] = useState('')
   const pageSize = 25
+
+  // Restore earn inputs for this date range
+  useEffect(() => {
+    try {
+      const all = JSON.parse(sessionStorage.getItem(EARN_INPUT_KEY) || '{}')
+      const hit = all[`${startDate}|${endDate}`]
+      setTotalEarnInr(hit?.earn != null ? String(hit.earn) : '')
+      setTotalImpsIn(hit?.imps != null ? String(hit.imps) : '')
+    } catch {
+      setTotalEarnInr('')
+      setTotalImpsIn('')
+    }
+  }, [startDate, endDate])
+
+  useEffect(() => {
+    try {
+      const all = JSON.parse(sessionStorage.getItem(EARN_INPUT_KEY) || '{}')
+      all[`${startDate}|${endDate}`] = {
+        earn: totalEarnInr,
+        imps: totalImpsIn,
+      }
+      sessionStorage.setItem(EARN_INPUT_KEY, JSON.stringify(all))
+    } catch {
+      /* ignore */
+    }
+  }, [startDate, endDate, totalEarnInr, totalImpsIn])
 
   useEffect(() => {
     const timer = setTimeout(() => setSearch(query.trim()), 350)
@@ -336,31 +429,49 @@ export default function PagesDashboard() {
   const totals = data?.totals
   const rows = data?.rows || []
   const mailSearch = mailQuery.trim().toLowerCase()
-  /** Share/Total base = sum of mail rows (same numbers as table) — GA property total alag chip */
+  /** Views base = mail rows sum. Earnings = your AdSense/AdX total allocated by views (GA4 revenue ₹0). */
   const mailAgg = useMemo(() => {
     let pages = 0
     let views = 0
     let activeUsers = 0
-    let totalRevenue = 0
+    let linkedViews = 0
     for (const row of mailRows) {
       pages += Number(row.pages) || 0
-      views += Number(row.views) || 0
+      const v = Number(row.views) || 0
+      views += v
       activeUsers += Number(row.activeUsers) || 0
-      totalRevenue += Number(row.totalRevenue) || 0
+      if (row.email !== UNLINKED) linkedViews += v
     }
     return {
       pages,
       views: Math.round(views),
+      linkedViews: Math.round(linkedViews),
       activeUsers: Math.round(activeUsers),
-      totalRevenue: Math.round(totalRevenue * 100) / 100,
     }
   }, [mailRows])
+
+  const alloc = useMemo(
+    () => allocateByViews(mailRows, totalEarnInr, totalImpsIn),
+    [mailRows, totalEarnInr, totalImpsIn],
+  )
+
   const mails = useMemo(() => {
     const MIN_VIEWS = 500
-    const list = mailRows.filter((row) => {
-      if (!mailSearch) return true
-      return String(row.email || '').toLowerCase().includes(mailSearch)
-    })
+    const list = mailRows
+      .filter((row) => {
+        if (!mailSearch) return true
+        return String(row.email || '').toLowerCase().includes(mailSearch)
+      })
+      .map((row) => {
+        const a = alloc.byEmail[row.email]
+        return {
+          ...row,
+          earn: a?.earnings ?? 0,
+          imps: a?.impressions ?? 0,
+          cpm: a?.cpm ?? 0,
+          share: a?.share ?? (mailAgg.views > 0 ? (Number(row.views) || 0) / mailAgg.views : 0),
+        }
+      })
     return list.sort((a, b) => {
       const aViews = Number(a.views) || 0
       const bViews = Number(b.views) || 0
@@ -369,21 +480,17 @@ export default function PagesDashboard() {
       if (aBand !== bBand) return aBand - bBand
 
       if (mailSort === 'cpm') {
-        const aCpm = cpmOf(a.totalRevenue, aViews)
-        const bCpm = cpmOf(b.totalRevenue, bViews)
-        if (aCpm !== bCpm) return aCpm - bCpm
+        if (a.cpm !== b.cpm) return a.cpm - b.cpm
         return bViews - aViews
       }
       if (mailSort === 'views') {
         if (bViews !== aViews) return bViews - aViews
-        return cpmOf(a.totalRevenue, aViews) - cpmOf(b.totalRevenue, bViews)
+        return a.cpm - b.cpm
       }
-      const aEarn = Number(a.totalRevenue) || 0
-      const bEarn = Number(b.totalRevenue) || 0
-      if (bEarn !== aEarn) return bEarn - aEarn
+      if (b.earn !== a.earn) return b.earn - a.earn
       return bViews - aViews
     })
-  }, [mailRows, mailSearch, mailSort])
+  }, [mailRows, mailSearch, mailSort, alloc, mailAgg.views])
   const rowCount = Number(data?.rowCount || mailTotal || 0)
   const pageCount = Math.max(1, Math.ceil(rowCount / pageSize))
   const mailDone = !mailLoading && mailRows.length > 0
@@ -392,6 +499,7 @@ export default function PagesDashboard() {
     mailDone && totals?.views != null
       ? Math.abs(Number(totals.views) - mailAgg.views) <= 1
       : null
+  const hasEarnInput = Number(totalEarnInr) > 0
 
   const applyRange = (start, end) => {
     setDraftStart(start)
@@ -468,6 +576,28 @@ export default function PagesDashboard() {
         {data?.mailWarning ? <p className="demo-error">{data.mailWarning}</p> : null}
         <div className="demo-toolbar">
           <label>
+            Total earnings (₹) — AdSense / AdX
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="e.g. 14706.64"
+              value={totalEarnInr}
+              onChange={(e) => setTotalEarnInr(e.target.value)}
+            />
+          </label>
+          <label>
+            Total impressions (optional)
+            <input
+              type="number"
+              min="0"
+              step="1"
+              placeholder={`default = linked views (${fmtInt(mailAgg.linkedViews)})`}
+              value={totalImpsIn}
+              onChange={(e) => setTotalImpsIn(e.target.value)}
+            />
+          </label>
+          <label>
             Search mail
             <input
               type="search"
@@ -486,19 +616,23 @@ export default function PagesDashboard() {
           </label>
         </div>
         <p className="demo-note">
-          Exact: har page path → primary mail (split nahi). Share = mail views ÷ table total.
-          CPM = revenue ÷ views × 1000 (₹). 500+ views upar.
+          GA4 me revenue ₹0 hota hai (AdSense link nahi) — isliye kamai yahan <strong>aapke total</strong> se
+          linked-mail views ke hisaab se baanti jati hai. CPM = earning ÷ impressions × 1000.
+          Unlinked rows earning nahi leti.
           {mailDone ? (
             <>
               {' '}
-              · Mail sum views <strong>{fmtInt(mailAgg.views)}</strong>
+              · Linked views <strong>{fmtInt(mailAgg.linkedViews)}</strong>
+              {' '}
+              · All views <strong>{fmtInt(mailAgg.views)}</strong>
               {totals?.views != null ? (
                 <>
                   {' '}
-                  · GA4 total <strong>{fmtInt(totals.views)}</strong>
-                  {viewsMatch === true ? ' · ✓ match' : viewsMatch === false ? ' · ⚠ mismatch (partial load)' : ''}
+                  · GA4 <strong>{fmtInt(totals.views)}</strong>
+                  {viewsMatch === true ? ' · ✓' : viewsMatch === false ? ' · ⚠ partial' : ''}
                 </>
               ) : null}
+              {!hasEarnInput ? ' · ⚠ pehle Total earnings (₹) daalo' : null}
             </>
           ) : null}
         </p>
@@ -509,42 +643,47 @@ export default function PagesDashboard() {
                 <th>#</th>
                 <th>Mail</th>
                 <th>Pages</th>
-                <th>Total views</th>
-                <th>Share</th>
-                <th>Active users</th>
-                <th>Total revenue</th>
-                <th>CPM</th>
+                <th>GA views</th>
+                <th>% Share</th>
+                <th>Impressions</th>
+                <th>Earning (₹)</th>
+                <th>CPM (₹)</th>
               </tr>
             </thead>
             <tbody>
               {mailDone ? (
                 <tr className="demo-total">
                   <td />
-                  <td>Total (mail sum)</td>
+                  <td>Total (allocated)</td>
                   <td>{fmtInt(mailAgg.pages)}</td>
-                  <td>{fmtInt(mailAgg.views)}</td>
+                  <td>{fmtInt(mailAgg.linkedViews)}</td>
                   <td>100%</td>
-                  <td>{fmtInt(mailAgg.activeUsers)}</td>
-                  <td>{fmtInr(mailAgg.totalRevenue)}</td>
-                  <td>{fmtInr(cpmOf(mailAgg.totalRevenue, mailAgg.views))}</td>
+                  <td>{fmtInt(alloc.baseImps)}</td>
+                  <td>{fmtInr(alloc.totalEarn)}</td>
+                  <td>{fmtInr(cpmOf(alloc.totalEarn, alloc.baseImps))}</td>
                 </tr>
               ) : null}
               {mails.map((row, index) => {
                 const views = Number(row.views) || 0
                 const low = views < 500
+                const unlinked = row.email === UNLINKED
                 return (
                 <tr key={row.email} className={low ? 'demo-low-views' : undefined}>
                   <td>{index + 1}</td>
                   <td>
                     {row.email}
                     {low ? <small>500 se kam views</small> : null}
+                    {unlinked ? <small>earning nahi</small> : null}
                   </td>
                   <td>{fmtInt(row.pages)}</td>
-                  <td>{fmtInt(row.views)}<small>{fmtShare(row.views, mailAgg.views)}</small></td>
-                  <td>{fmtShare(row.views, mailAgg.views)}</td>
-                  <td>{fmtInt(row.activeUsers)}</td>
-                  <td>{fmtInr(row.totalRevenue)}<small>{fmtShare(row.totalRevenue, mailAgg.totalRevenue)}</small></td>
-                  <td>{fmtInr(cpmOf(row.totalRevenue, row.views))}</td>
+                  <td>
+                    {fmtInt(row.views)}
+                    <small>{fmtShare(row.views, mailAgg.linkedViews || mailAgg.views)}</small>
+                  </td>
+                  <td>{unlinked ? '—' : fmtShare(row.views, mailAgg.linkedViews)}</td>
+                  <td>{unlinked ? '—' : fmtInt(row.imps)}</td>
+                  <td>{unlinked ? '—' : fmtInr(row.earn)}</td>
+                  <td>{unlinked ? '—' : fmtInr(row.cpm)}</td>
                 </tr>
                 )
               })}
