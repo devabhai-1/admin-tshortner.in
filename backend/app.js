@@ -150,6 +150,22 @@ function extractLinkId(path) {
   return raw ? raw.toLowerCase() : null;
 }
 
+/** Site chrome / non-short URLs — inko "Mail not linked" me mat gino */
+const NON_LINK_PATH_TOKENS = new Set([
+  '', 'home', 'index', 'login', 'signup', 'register', 'player', 'watch', 'api',
+  'admin', 'favicon.ico', 'robots.txt', 'sitemap.xml', 'about', 'privacy',
+  'terms', 'contact', 'dashboard', 'redirect', 'go', 'r', 'www', 'static',
+  'assets', 'css', 'js', 'img', 'images', 'null', 'undefined',
+]);
+
+function isLikelyShortCode(id) {
+  if (!id) return false;
+  const s = String(id).trim().toLowerCase();
+  if (NON_LINK_PATH_TOKENS.has(s)) return false;
+  if (s.includes('.') && !s.includes('@')) return false; // file.ext
+  return /^[a-z0-9_-]{5,40}$/.test(s);
+}
+
 function parseIsoDate(s) {
   if (!s || typeof s !== 'string') return null;
   s = s.trim();
@@ -421,7 +437,7 @@ async function loadRealtimeEmails(startS, endS) {
   return map;
 }
 
-async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50000, onBatch }) {
+async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50000, onBatch, refreshMap = false }) {
   const started = Date.now();
   let offset = 0;
   let totalExpected = null;
@@ -470,19 +486,25 @@ async function pullGaPages({ startS, endS, rawMode, pageSize = 10000, maxMs = 50
     lastError = `Incomplete: ${fetched} / ${totalExpected} pages loaded`;
   }
 
+  // Full allLinks map first (avoids timeout → huge "Mail not linked")
+  let lidLookup = {};
+  try {
+    lidLookup = linkIdToEmailLookup(await firebaseMappingCached(!!refreshMap)) || {};
+  } catch (e) {
+    console.warn('firebase map for GA pull:', e.message);
+  }
+
   const realtimeEmails = await loadRealtimeEmails(startS, endS);
+  for (const [norm, email] of realtimeEmails) {
+    if (norm && email && !lidLookup[norm]) lidLookup[norm] = email;
+  }
+
   const viewByCode = new Map();
   for (const row of gaRows) {
     const raw = extractLinkIdRaw(row.dimensionValues?.[1]?.value || '');
-    if (!raw) continue;
+    if (!raw || !isLikelyShortCode(normalizeId(raw) || raw)) continue;
     const views = Number(row.metricValues?.[0]?.value || 0);
     viewByCode.set(raw, (viewByCode.get(raw) || 0) + views);
-  }
-  const lidLookup = {};
-  for (const raw of viewByCode.keys()) {
-    const norm = normalizeId(raw);
-    const email = norm ? realtimeEmails.get(norm) : '';
-    if (norm && email) lidLookup[norm] = email;
   }
   const missing = [...viewByCode.keys()]
     .filter((raw) => !lidLookup[normalizeId(raw)])
@@ -542,6 +564,7 @@ function rowsToOutput(gaRows, lidLookup, rawMode) {
 
         const readableDate = `${rawDate.substring(0, 4)}-${rawDate.substring(4, 6)}-${rawDate.substring(6)}`;
         const linkId = normalizeId(extractLinkId(pagePath));
+        const shortOk = isLikelyShortCode(linkId);
 
         if (rawMode) {
             const matchedEmail = linkId ? lidLookup[linkId] : null;
@@ -555,6 +578,9 @@ function rowsToOutput(gaRows, lidLookup, rawMode) {
             });
             continue;
         }
+
+        // Homepage / player / non-short paths — allocation se bahar (Mail not linked inflate mat karo)
+        if (!shortOk) continue;
 
         const matchedEmail = linkId ? lidLookup[linkId] : '';
         out.push({
@@ -785,11 +811,13 @@ app.get('/api/analytics', async (req, res) => {
 
         const startS = formatDate(startDate);
         const endS = formatDate(endDate);
+        const refreshMap = String(req.query.refresh_map || '') === '1';
         const output = [];
         const pulled = await pullGaPages({
             startS,
             endS,
             rawMode,
+            refreshMap,
             pageSize: 10000,
             maxMs: 50000,
             onBatch: async (batch) => {
@@ -901,10 +929,12 @@ app.get('/api/analytics/stream', async (req, res) => {
 
         emit("progress", { phase: "ga4", message: "Fetching GA4…" });
 
+        const refreshMap = String(req.query.refresh_map || '') === '1';
         const pulled = await pullGaPages({
             startS,
             endS,
             rawMode,
+            refreshMap,
             pageSize: 10000,
             maxMs: 52000,
             onBatch: async (outBatch, info) => {

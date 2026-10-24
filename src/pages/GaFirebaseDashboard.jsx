@@ -22,8 +22,9 @@ import { formatUsd } from '../lib/withdrawals.js'
 
 /** GA4 allocation + Firebase save — सब calculation USD ($), wallet जैसा */
 
-const GA_ANALYTICS_SESSION_KEY = 'tshortner.ga4.analytics.v6'
-const GA_ANALYTICS_SESSION_RAW = 'tshortner.ga4.analytics.raw.v5'
+const GA_ANALYTICS_SESSION_KEY = 'tshortner.ga4.analytics.v7'
+const GA_ANALYTICS_SESSION_RAW = 'tshortner.ga4.analytics.raw.v6'
+const UNLINKED_MAIL = 'Mail not linked'
 const PANEL_MODE_KEY = 'tshortner.admin.panelMode'
 /** Pehli load: sirf latest N din (fast). Purani date select → on-demand fetch. */
 const GA_INITIAL_DAYS = Number(import.meta.env.VITE_GA4_INITIAL_DAYS) || 5
@@ -153,10 +154,15 @@ function useGaAllocations(analyticsRows, selectedGaDate, gaTotalImpressions, gaT
   return useMemo(() => {
     const rowsForDate = analyticsRows.filter((r) => r.date === selectedGaDate)
     const byEmail = {}
+    let unlinkedViews = 0
     for (const row of rowsForDate) {
       const email = (row.email || '').trim()
       const views = safeNum(row.views)
       if (!email) continue
+      if (email === UNLINKED_MAIL || row.matched === false) {
+        unlinkedViews += views
+        continue
+      }
       byEmail[email] = (byEmail[email] || 0) + views
     }
     const currentDateRows = Object.entries(byEmail).map(([email, views]) => ({
@@ -171,15 +177,19 @@ function useGaAllocations(analyticsRows, selectedGaDate, gaTotalImpressions, gaT
         allocations: {},
         sortedRows: [],
         totalViews: 0,
+        linkedViews: 0,
+        unlinkedViews,
         baseLabel: 'Views',
       }
     }
 
-    const totalViews = currentDateRows.reduce((sum, r) => sum + safeNum(r.views), 0)
+    // Share sirf linked mails pe — "Mail not linked" earnings/impressions me nahi
+    const linkedViews = currentDateRows.reduce((sum, r) => sum + safeNum(r.views), 0)
+    const totalViews = linkedViews + unlinkedViews
     const manualImps = safeNum(gaTotalImpressions)
     const manualEarn = safeNum(gaTotalEarnings)
-    const baseImps = manualImps > 0 ? manualImps : totalViews
-    const baseLabel = manualImps > 0 ? 'Manual Impressions' : 'Views'
+    const baseImps = manualImps > 0 ? manualImps : linkedViews
+    const baseLabel = manualImps > 0 ? 'Manual Impressions' : 'Linked Views'
 
     const allocations = {}
     const sorted = currentDateRows.slice().sort((a, b) => safeNum(b.views) - safeNum(a.views))
@@ -187,7 +197,7 @@ function useGaAllocations(analyticsRows, selectedGaDate, gaTotalImpressions, gaT
     const sortedRows = sorted.map((row) => {
       const email = row.email
       const views = safeNum(row.views)
-      const share = totalViews > 0 ? views / totalViews : 0
+      const share = linkedViews > 0 ? views / linkedViews : 0
       const imps = Math.round(share * baseImps)
       const earn = manualEarn > 0 ? toFixed2(share * manualEarn) : 0
       const cpm = imps > 0 && earn > 0 ? toFixed2((earn / imps) * 1000) : 0
@@ -207,6 +217,8 @@ function useGaAllocations(analyticsRows, selectedGaDate, gaTotalImpressions, gaT
       allocations,
       sortedRows,
       totalViews,
+      linkedViews,
+      unlinkedViews,
       baseLabel,
     }
   }, [analyticsRows, selectedGaDate, gaTotalImpressions, gaTotalEarnings])
@@ -1117,7 +1129,10 @@ export default function GaFirebaseDashboard() {
 
             <div className="stat-bar">
               <div className="stat-chip">
-                GA4 Total Views (selected date): <strong>{gaSlice.totalViews}</strong>
+                Linked GA views: <strong>{gaSlice.linkedViews ?? gaSlice.totalViews}</strong>
+              </div>
+              <div className="stat-chip">
+                Unlinked (excluded): <strong>{gaSlice.unlinkedViews || 0}</strong>
               </div>
               <div className="stat-chip">
                 Records: <strong>{gaSlice.sortedRows.length} users</strong>
@@ -1126,6 +1141,13 @@ export default function GaFirebaseDashboard() {
                 Allocation Base: <strong>{gaSlice.baseLabel}</strong>
               </div>
             </div>
+            {(gaSlice.unlinkedViews || 0) > 0 ? (
+              <p className="card-sub" style={{ marginTop: 0 }}>
+                <span className="tag-small">Note</span>
+                Unlinked views (orphan short codes / no Firebase owner) table me nahi — % share sirf linked
+                mails pe.
+              </p>
+            ) : null}
 
             <table className="ga-sort-table">
               <thead>
