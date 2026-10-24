@@ -1252,50 +1252,38 @@ async function runPagesReport(startDate, endDate, { limit, offset, q, metrics })
   }
 }
 
-/** All page rows for mail rollup — few large GA4 pages instead of 40-row client loop */
+/**
+ * Mail rollup for /pages — Vercel-safe:
+ * - Top N pages by views only (not all 27k+)
+ * - Per-code Firebase lookup (never download full allLinks.json)
+ */
 async function fetchAllPagesForMails(startDate, endDate, q) {
   const metrics = ['screenPageViews', 'activeUsers', 'totalRevenue'];
-  const pageSize = 10000;
-  const maxRows = 50000;
-  const started = Date.now();
-  const maxMs = 45000;
-  let offset = 0;
-  let rowCount = 0;
-  let totalsRow = null;
-  let metricNames = metrics;
-  const mappedRows = [];
+  // ~27k paths exist; top 2k covers almost all meaningful traffic
+  const maxRows = Math.max(500, Math.min(3000, Number(process.env.PAGES_MAIL_TOP_ROWS || 2000)));
+  const report = await runPagesReport(startDate, endDate, {
+    limit: maxRows,
+    offset: 0,
+    q,
+    metrics,
+  });
+  const metricNames = report._metricNames || metrics;
+  const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+  const rowCount = Number(report.rowCount || 0);
+  const mappedRows = (report.rows || []).map((row) => ({
+    path: row.dimensionValues?.[0]?.value || '(not set)',
+    views: numMetric(row, idx.screenPageViews),
+    activeUsers: numMetric(row, idx.activeUsers),
+    totalRevenue: numMetric(row, idx.totalRevenue),
+  }));
 
-  while (Date.now() - started < maxMs && mappedRows.length < maxRows) {
-    const report = await runPagesReport(startDate, endDate, {
-      limit: pageSize,
-      offset,
-      q,
-      metrics,
-    });
-    metricNames = report._metricNames || metrics;
-    const idx = Object.fromEntries(metricNames.map((name, i) => [name, i]));
-    if (!totalsRow && report.totals?.[0]) totalsRow = report.totals[0];
-    rowCount = Number(report.rowCount || rowCount);
-    const batch = report.rows || [];
-    for (const row of batch) {
-      mappedRows.push({
-        path: row.dimensionValues?.[0]?.value || '(not set)',
-        views: numMetric(row, idx.screenPageViews),
-        activeUsers: numMetric(row, idx.activeUsers),
-        totalRevenue: numMetric(row, idx.totalRevenue),
-      });
-    }
-    offset += batch.length;
-    if (!batch.length || offset >= rowCount || batch.length < pageSize) break;
-  }
-
-  const idxT = Object.fromEntries(metricNames.map((name, i) => [name, i]));
+  const totalsRow = report.totals?.[0];
   const totals = totalsRow
     ? {
         path: 'Total',
-        views: numMetric(totalsRow, idxT.screenPageViews),
-        activeUsers: numMetric(totalsRow, idxT.activeUsers),
-        totalRevenue: numMetric(totalsRow, idxT.totalRevenue),
+        views: numMetric(totalsRow, idx.screenPageViews),
+        activeUsers: numMetric(totalsRow, idx.activeUsers),
+        totalRevenue: numMetric(totalsRow, idx.totalRevenue),
         viewsPerUser: 0,
         avgEngagementTime: 0,
         eventCount: 0,
@@ -1312,53 +1300,40 @@ async function fetchAllPagesForMails(startDate, endDate, q) {
         keyEvents: 0,
       };
 
-  let mailWarning = '';
-  let emailsByCode = {};
-  try {
-    emailsByCode = linkIdToEmailsLookup(await firebaseMappingCached(false)) || {};
-  } catch (err) {
-    mailWarning = err.message || 'Mail map nahi bana';
-  }
-
-  const missing = [];
+  const codes = [];
   for (const row of mappedRows) {
-    const code = normalizeId(pathCode(row.path)) || pathCode(row.path);
-    const emails = (code && emailsByCode[code]) || [];
-    if (emails.length) {
-      row.emails = emails;
-    } else if (code && isLikelyShortCode(code)) {
-      missing.push(code);
-      row._code = code;
-      row.emails = [];
-    } else {
-      row.emails = [];
-    }
+    // Keep Firebase key casing (path segment as-is)
+    const code = pathCode(row.path);
+    row._code = code;
+    if (code && isLikelyShortCode(normalizeId(code) || code)) codes.push(code);
   }
 
-  // Top unmatched short codes only (budget) — rest stay unlinked
-  const uniqMissing = [...new Set(missing)].slice(0, 300);
-  if (uniqMissing.length) {
-    try {
-      const found = await lookupOwners(uniqMissing, {
-        deadlineMs: 6000,
-        concurrency: 40,
-        fetchMs: 2000,
-      });
-      for (const row of mappedRows) {
-        if (row.emails?.length || !row._code) continue;
-        row.emails = found.get(row._code) || OWNER_CACHE.get(row._code) || [];
-        delete row._code;
-      }
-    } catch (err) {
-      mailWarning = mailWarning || err.message || 'Partial mail lookup';
-    }
-  } else {
-    for (const row of mappedRows) delete row._code;
+  let mailWarning = '';
+  try {
+    await lookupOwners([...new Set(codes)], {
+      deadlineMs: 12000,
+      concurrency: 48,
+      fetchMs: 2500,
+    });
+  } catch (err) {
+    mailWarning = err.message || 'Partial mail lookup';
+  }
+
+  for (const row of mappedRows) {
+    const code = row._code;
+    delete row._code;
+    row.emails = code ? OWNER_CACHE.get(code) || [] : [];
+  }
+
+  if (rowCount > mappedRows.length) {
+    mailWarning =
+      (mailWarning ? `${mailWarning} · ` : '') +
+      `Top ${mappedRows.length} pages by views (of ${rowCount})`;
   }
 
   return {
     rows: mappedRows,
-    rowCount: rowCount || mappedRows.length,
+    rowCount,
     totals,
     mailWarning,
     complete: !rowCount || mappedRows.length >= rowCount,
@@ -1602,48 +1577,23 @@ app.get('/api/analytics/pages', async (req, res) => {
       };
     };
 
+    // Table: sirf is page ke ~25 codes — full allLinks mat lao (Vercel 504/OOM)
     const mappedRows = (report.rows || []).map(mapRow);
-    let emailsByCode = {};
     let mailWarning = '';
     try {
-      emailsByCode = linkIdToEmailsLookup(await firebaseMappingCached(false)) || {};
+      const codes = mappedRows.map((row) => pathCode(row.path)).filter(Boolean);
+      await lookupOwners(codes, {
+        deadlineMs: 5000,
+        concurrency: 20,
+        fetchMs: 2000,
+      });
     } catch (err) {
-      console.error('mail map', err);
+      console.error('mail lookup', err);
       mailWarning = err.message || 'Mail map nahi bana';
     }
-    const missingCodes = [];
     for (const row of mappedRows) {
-      const code = normalizeId(pathCode(row.path)) || pathCode(row.path);
-      const emails = (code && emailsByCode[code]) || [];
-      if (emails.length) {
-        row.emails = emails;
-      } else if (code) {
-        missingCodes.push(code);
-        row._code = code;
-        row.emails = [];
-      } else {
-        row.emails = [];
-      }
-    }
-    if (missingCodes.length) {
-      try {
-        const found = await lookupOwners([...new Set(missingCodes)], {
-          deadlineMs: 4000,
-          concurrency: 24,
-          fetchMs: 1500,
-        });
-        for (const row of mappedRows) {
-          if (row.emails?.length || !row._code) {
-            delete row._code;
-            continue;
-          }
-          row.emails = found.get(row._code) || [];
-          delete row._code;
-        }
-      } catch (err) {
-        mailWarning = mailWarning || err.message;
-        for (const row of mappedRows) delete row._code;
-      }
+      const code = pathCode(row.path);
+      row.emails = code ? OWNER_CACHE.get(code) || [] : [];
     }
     const rows = mappedRows;
     const rowCount = Number(report.rowCount || 0);
